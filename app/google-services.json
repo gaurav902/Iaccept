@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "84839507219",
+    "project_id": "com-tellmeindia-iaccept-7fbdf",
+    "storage_bucket": "com-tellmeindia-iaccept-7fbdf.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:84839507219:android:ccb7f05edcae5f4586a6e6",
+        "android_client_info": {
+          "package_name": "com.tellmeindia.iaccept"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBiPUNp_lUKAUIlgPmSNxdWjESUtN6ZnAk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

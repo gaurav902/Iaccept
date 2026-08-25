@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">IAccept</string>
+    <string name="channel_name">IAccept Service</string>
+    <string name="channel_desc">Monitoring ride requests</string>
+    <string name="accept">Accept</string>
+    <string name="dismiss">Dismiss</string>
+    <string name="fare_label">Fare: ₹%d</string>
+    <string name="distance_label">Distance: %s km</string>
+    <string name="ride_match">RIDE MATCHED!</string>
+    <string name="ride_request">New Ride Request</string>
+</resources>

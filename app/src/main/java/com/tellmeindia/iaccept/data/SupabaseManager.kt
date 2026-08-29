@@ -14,7 +14,14 @@ import io.github.jan.supabase.realtime.channel
 import io.github.jan.supabase.realtime.postgresChangeFlow
 import io.github.jan.supabase.realtime.realtime
 import io.github.jan.supabase.postgrest.query.Columns
+import io.github.jan.supabase.postgrest.query.PostgrestUpdate
+import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
+import io.ktor.client.request.post
+import io.ktor.client.request.setBody
+import io.ktor.client.statement.bodyAsText
+import io.ktor.http.ContentType
+import io.ktor.http.contentType
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -23,17 +30,25 @@ import kotlinx.coroutines.launch
 import kotlinx.datetime.Instant
 import kotlinx.datetime.Clock
 import io.github.jan.supabase.gotrue.providers.builtin.Email
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.jsonObject
 
 class SupabaseManager(private val context: Context) {
 
     private val supabaseUrl = "http://72.60.223.74:8000" 
     private val supabaseKey = "sb_publishable_lCmGJsNQx8eg1S-YORUyOp_gKfglsNH"
+    private val apiBaseUrl = "https://iaccept.tellmeindia.com/api/payments"
 
     val client: SupabaseClient = createSupabaseClient(supabaseUrl, supabaseKey) {
         httpEngine = OkHttp.create()
         install(Auth)
         install(Postgrest)
         install(Realtime)
+    }
+
+    private val httpClient = HttpClient(OkHttp) {
+        // Simple client for Next.js API calls
     }
 
     private val _subscriptionActive = MutableStateFlow(false)
@@ -141,7 +156,8 @@ class SupabaseManager(private val context: Context) {
                 gmail = emailToUse,
                 homeAddress = user.homeAddress,
                 cloudSubUntil = Clock.System.now().toString(),
-                cloudReferralCode = referralCode
+                cloudReferralCode = referralCode,
+                vehicleType = user.vehicleType
             )
 
             // 2. Forced Upsert (The Ground Truth)
@@ -159,11 +175,11 @@ class SupabaseManager(private val context: Context) {
 
                     if (referrer != null) {
                         Log.d("SupabaseManager", "REFERRER FOUND: ${referrer.id}")
-                        val refRecord = mapOf(
-                            "referrer_id" to referrer.id,
-                            "referred_user_id" to newUser.id,
-                            "status" to "signed_up"
-                        )
+                        val refRecord = buildJsonObject {
+                            put("referrer_id", referrer.id)
+                            put("referred_user_id", newUser.id)
+                            put("status", "signed_up")
+                        }
                         client.postgrest["referrals"].insert(refRecord)
                     }
                 } catch (e: Exception) {
@@ -214,20 +230,29 @@ class SupabaseManager(private val context: Context) {
         }
     }
 
-    suspend fun updateProfile(username: String, phone: String, homeAddress: String): Result<Boolean> {
+    suspend fun updateProfile(username: String, phone: String, homeAddress: String, vehicleType: String? = null): Result<Boolean> {
         return try {
             val user = client.auth.currentUserOrNull() ?: return Result.failure(Exception("Not logged in"))
-            Log.d("SupabaseManager", "UPDATING PROFILE: User=${user.id} Name=$username Phone=$phone Addr=$homeAddress")
+            Log.d("SupabaseManager", "UPDATING PROFILE: User=${user.id} Name=$username Phone=$phone Addr=$homeAddress Vehicle=$vehicleType")
             
-            // Fix: Map directly to DB columns to avoid SerialName mismatches
-            val updates = mapOf(
-                "username" to username,
-                "phone" to phone,
-                "home_address" to homeAddress
-            )
+            val updates = buildJsonObject {
+                put("username", username)
+                put("phone", phone)
+                put("home_address", homeAddress)
+                vehicleType?.let { put("vehicle_type", it) }
+            }
             
             client.postgrest["profiles"].update(updates) {
                 filter { eq("id", user.id) }
+            }
+            // Update the local timestamp for the 30-day check
+            if (vehicleType != null) {
+                val updatesTs = buildJsonObject {
+                    put("vehicle_updated_at", Clock.System.now().toString())
+                }
+                client.postgrest["profiles"].update(updatesTs) {
+                    filter { eq("id", user.id) }
+                }
             }
             Result.success(true)
         } catch (e: Exception) {
@@ -241,10 +266,10 @@ class SupabaseManager(private val context: Context) {
             val user = client.auth.currentUserOrNull() ?: return Result.failure(Exception("Not logged in"))
             Log.d("SupabaseManager", "UPDATING LOCATION: Lat=$lat Lng=$lng")
             
-            val updates = mapOf(
-                "live_lat" to lat,
-                "live_lng" to lng
-            )
+            val updates = buildJsonObject {
+                put("live_lat", lat)
+                put("live_lng", lng)
+            }
             
             client.postgrest["profiles"].update(updates) {
                 filter { eq("id", user.id) }
@@ -256,13 +281,44 @@ class SupabaseManager(private val context: Context) {
         }
     }
 
-    suspend fun getActivePlans(): List<Plan> {
+    suspend fun getActivePlans(vehicleType: String? = null): List<Plan> {
         return try {
             client.postgrest["plans"].select {
-                filter { eq("is_active", true) }
+                filter { 
+                    eq("is_active", true) 
+                    vehicleType?.let { eq("vehicle_type", it) }
+                }
             }.decodeList<Plan>()
         } catch (e: Exception) {
             emptyList()
+        }
+    }
+
+    suspend fun applyReferralCode(code: String): Boolean {
+        return try {
+            val user = client.auth.currentUserOrNull() ?: return false
+            Log.d("SupabaseManager", "APPLYING REFERRAL: Code=$code User=${user.id}")
+            
+            // 1. Find the referrer
+            val referrer = client.postgrest["profiles"].select {
+                filter { eq("referral_code", code.trim().uppercase()) }
+            }.decodeSingleOrNull<ProfileRow>()
+
+            if (referrer != null && referrer.id != user.id) {
+                // 2. Insert into referrals table (Trigger on backend will add the days)
+                val refRecord = buildJsonObject {
+                    put("referrer_id", referrer.id)
+                    put("referred_user_id", user.id)
+                    put("status", "signed_up")
+                }
+                client.postgrest["referrals"].insert(refRecord)
+                true
+            } else {
+                false
+            }
+        } catch (e: Exception) {
+            Log.e("SupabaseManager", "Referral Apply Failed", e)
+            false
         }
     }
 
@@ -316,34 +372,26 @@ class SupabaseManager(private val context: Context) {
         }
     }
 
-    suspend fun getCloudRideHistory(): List<CloudRideHistory> {
+    suspend fun createRazorpayOrder(plan: Plan): String? {
         return try {
-            val user = client.auth.currentUserOrNull() ?: return emptyList()
-            client.postgrest["ride_history"].select {
-                filter { eq("user_id", user.id) }
-            }.decodeList<CloudRideHistory>()
+            val user = client.auth.currentUserOrNull() ?: return null
+            val response = httpClient.post("$apiBaseUrl/create-order") {
+                contentType(ContentType.Application.Json)
+                setBody(buildJsonObject {
+                    put("userId", user.id)
+                    put("planId", plan.id)
+                    put("amount", plan.price)
+                })
+            }
+            val body = response.bodyAsText()
+            Log.d("SupabaseManager", "Order Created: $body")
+            
+            // Extract order_id from JSON string
+            val json = kotlinx.serialization.json.Json.parseToJsonElement(body).jsonObject
+            json["id"]?.toString()?.replace("\"", "")
         } catch (e: Exception) {
-            emptyList()
-        }
-    }
-
-    suspend fun saveRideToCloud(fare: Int, pickup: String, drop: String, dist: Double, timestamp: Long): Result<Boolean> {
-        return try {
-            val user = client.auth.currentUserOrNull() ?: return Result.failure(Exception("Not logged in"))
-            val ride = CloudRideHistory(
-                userId = user.id,
-                fare = fare,
-                pickupAddr = pickup,
-                dropAddr = drop,
-                totalDist = dist,
-                timestamp = timestamp
-            )
-            client.postgrest["ride_history"].insert(ride)
-            Log.d("SupabaseManager", "Ride Saved to Cloud: $fare at $pickup")
-            Result.success(true)
-        } catch (e: Exception) {
-            Log.e("SupabaseManager", "Cloud Ride Sync Failed: ${e.message}")
-            Result.failure(e)
+            Log.e("SupabaseManager", "Order Creation Failed", e)
+            null
         }
     }
 

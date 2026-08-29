@@ -7,6 +7,7 @@ import androidx.room.PrimaryKey
 data class UserProfile(
     @PrimaryKey
     val localId: Int = 1, // Fixed ID to ensure only ONE profile ever exists locally
+    var cloudId: String = "", // Supabase UUID
     var phone: String = "",
     var username: String = "",
     var gmail: String = "",
@@ -15,5 +16,7 @@ data class UserProfile(
     var referredBy: String = "",
     var isLoggedIn: Boolean = false,
     var referralCode: String = "",
-    var subscriptionUntil: String = ""
+    var subscriptionUntil: String = "",
+    var vehicleType: String = "bike",
+    var vehicleTypeUpdatedAt: String = ""
 )

@@ -145,15 +145,21 @@ fun ReferralScreen(
                 val rewardDays = settings["referral_reward_days"]?.toIntOrNull() ?: 7
                 
                 // Optimized Paid Count (Sign up + Active Sub)
-                val paidCount = referrals.count { ref ->
-                    val isPaidStatus = ref.status.lowercase() == "paid"
-                    val hasActiveSub = ref.referredProfile?.cloudSubUntil?.let { until ->
-                        try {
-                            val iso = until.replace(" ", "T").split("+")[0].split("Z")[0] + "Z"
-                            kotlinx.datetime.Instant.parse(iso) > kotlinx.datetime.Clock.System.now()
-                        } catch(e: Exception) { false }
-                    } ?: false
-                    isPaidStatus || hasActiveSub
+                val paidCount = remember(referrals) {
+                    referrals.count { ref ->
+                        val isPaidStatus = ref.status.lowercase() == "paid"
+                        val subUntil = ref.referredProfile?.cloudSubUntil
+                        
+                        if (isPaidStatus) true
+                        else if (subUntil == null) false
+                        else {
+                            try {
+                                val cleanIso = subUntil.replace(" ", "T").split("+")[0].split("Z")[0]
+                                val finalIso = if (cleanIso.endsWith("Z")) cleanIso else "${cleanIso}Z"
+                                kotlinx.datetime.Instant.parse(finalIso) > kotlinx.datetime.Clock.System.now()
+                            } catch(e: Exception) { false }
+                        }
+                    }
                 }
 
                 PremiumCard(title = "Your Progress") {
@@ -251,12 +257,27 @@ fun ReferralItemPremium(info: ReferralInfo) {
             }
             
             // Smart Status logic
-            val hasPaid = info.status.lowercase() == "paid" || info.referredProfile?.cloudSubUntil?.let { until ->
-                try {
-                    val iso = until.replace(" ", "T").split("+")[0].split("Z")[0] + "Z"
-                    kotlinx.datetime.Instant.parse(iso) > kotlinx.datetime.Clock.System.now()
-                } catch(e: Exception) { false }
-            } == true
+            val hasPaid = remember(info) {
+                val isPaidStatus = info.status.lowercase() == "paid"
+                val subUntil = info.referredProfile?.cloudSubUntil
+                
+                if (isPaidStatus) true
+                else if (subUntil == null) false
+                else {
+                    try {
+                        // High-precision parsing matching SupabaseManager
+                        val cleanIso = subUntil.replace(" ", "T")
+                            .split("+")[0].split("Z")[0]
+                        val finalIso = if (cleanIso.endsWith("Z")) cleanIso else "${cleanIso}Z"
+                        val expiry = kotlinx.datetime.Instant.parse(finalIso)
+                        
+                        // If subscription is in the future, they have paid
+                        expiry > kotlinx.datetime.Clock.System.now()
+                    } catch (e: Exception) {
+                        false
+                    }
+                }
+            }
 
             Surface(
                 color = if (hasPaid) NeonGreen.copy(alpha = 0.1f) else Color.Gray.copy(alpha = 0.1f),

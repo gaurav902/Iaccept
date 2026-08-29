@@ -21,19 +21,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val localProfile = db.dao().getProfile()
     
-    @OptIn(ExperimentalCoroutinesApi::class)
-    val rideHistory = localProfile.map { it?.gmail ?: "" }.flatMapLatest { gmail ->
-        if (gmail.isBlank()) flowOf(emptyList())
-        else db.dao().getRidesForUser(gmail)
-    }
     val isSubscribed = supabaseManager.subscriptionActive
     val cloudProfile = supabaseManager.profileFlow
 
     val minFare = preferenceManager.minFare
     val maxDistance = preferenceManager.maxDistance
     val autoAcceptEnabled = preferenceManager.autoAcceptEnabled
-    val autoAcceptMode = preferenceManager.autoAcceptMode
-    val lastNotification = preferenceManager.lastNotification
     val automationMaster = preferenceManager.automationMaster
     val upiSafeMode = preferenceManager.upiSafeMode
     val screenInteraction = preferenceManager.screenInteraction
@@ -42,6 +35,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val rapidoEnabled = preferenceManager.rapidoEnabled
     val uberEnabled = preferenceManager.uberEnabled
     val disclosureAccepted = preferenceManager.disclosureAccepted
+    val themeMode = preferenceManager.themeMode
 
     init {
         viewModelScope.launch {
@@ -55,11 +49,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             combine(cloudProfile, localProfile) { cp, lp -> cp to lp }.collect { (cp, lp) ->
                 if (cp != null && lp != null) {
                     val updated = lp.copy(
+                        cloudId = cp.id,
                         username = cp.username ?: lp.username,
                         phone = cp.phone ?: lp.phone,
                         homeAddress = cp.homeAddress ?: lp.homeAddress,
                         referralCode = cp.cloudReferralCode ?: lp.referralCode,
-                        subscriptionUntil = cp.cloudSubUntil ?: lp.subscriptionUntil
+                        subscriptionUntil = cp.cloudSubUntil ?: lp.subscriptionUntil,
+                        vehicleType = cp.vehicleType ?: lp.vehicleType,
+                        vehicleTypeUpdatedAt = cp.vehicleUpdatedAt ?: lp.vehicleTypeUpdatedAt
                     )
                     if (updated != lp) {
                         withContext(Dispatchers.IO) { db.dao().saveProfile(updated) }
@@ -89,24 +86,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { preferenceManager.updateAutoAccept(enabled) }
     }
 
-    fun updateAutoAcceptMode(mode: Int) {
-        viewModelScope.launch { preferenceManager.updateAutoAcceptMode(mode) }
-    }
-
-    fun updateAutomationMaster(enabled: Boolean) {
-        viewModelScope.launch { preferenceManager.updateAutomationMaster(enabled) }
+    fun updateMainScanner(enabled: Boolean) {
+        viewModelScope.launch {
+            preferenceManager.updateAutomationMaster(enabled)
+            preferenceManager.updateScreenInteraction(enabled)
+            preferenceManager.updateServiceEnabled(enabled)
+        }
     }
 
     fun updateUpiSafeMode(enabled: Boolean) {
         viewModelScope.launch { preferenceManager.updateUpiSafeMode(enabled) }
-    }
-
-    fun updateScreenInteraction(enabled: Boolean) {
-        viewModelScope.launch { preferenceManager.updateScreenInteraction(enabled) }
-    }
-
-    fun updateServiceEnabled(enabled: Boolean) {
-        viewModelScope.launch { preferenceManager.updateServiceEnabled(enabled) }
     }
 
     fun updateParcelFilter(enabled: Boolean) {
@@ -125,30 +114,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { preferenceManager.updateDisclosureAccepted(accepted) }
     }
 
-    fun refreshProfile() {
-        viewModelScope.launch { supabaseManager.refreshProfile() }
+    fun updateThemeMode(mode: Int) {
+        viewModelScope.launch { preferenceManager.updateThemeMode(mode) }
     }
 
-    fun performSync(gmail: String) {
-        if (gmail.isBlank()) return
-        viewModelScope.launch(Dispatchers.IO) {
+    fun refreshProfile() {
+        viewModelScope.launch {
             _uiState.update { it.copy(isSyncing = true) }
-            try {
-                val cloudRides = supabaseManager.getCloudRideHistory()
-                val localRides = db.dao().getRidesForUserSync(gmail)
-                cloudRides.forEach { cr ->
-                    val isRideExisting = localRides.any { Math.abs(it.timestamp - cr.timestamp) < 5000 }
-                    if (!isRideExisting) {
-                        db.dao().insertRide(
-                            RideRecord(0, gmail, cr.fare, cr.totalDist ?: 0.0, 0.0, 0.0, 
-                                cr.pickupAddr, cr.dropAddr, "Cloud Sync", "", cr.timestamp, true, true)
-                        )
-                    }
-                }
-            } catch (e: Exception) {
-            } finally {
-                _uiState.update { it.copy(isSyncing = false) }
-            }
+            supabaseManager.refreshProfile()
+            delay(500) // Small delay for visual feedback
+            _uiState.update { it.copy(isSyncing = false) }
         }
     }
 

@@ -17,7 +17,6 @@ import com.tellmeindia.iaccept.R
 import com.tellmeindia.iaccept.data.SupabaseManager
 import com.tellmeindia.iaccept.data.IAcceptDatabase
 import com.tellmeindia.iaccept.data.PreferenceManager
-import com.tellmeindia.iaccept.data.RideRecord
 import com.tellmeindia.iaccept.logic.RideFilterEngine
 import com.tellmeindia.iaccept.logic.RideInfo
 import com.tellmeindia.iaccept.logic.MatchResult as RideMatchResult
@@ -50,14 +49,12 @@ class RideAccessibilityService : AccessibilityService() {
     private var cachedMinFare = 0
     private var cachedMaxDistance = 100.0
     private var cachedAutoAccept = false
-    private var cachedAutoAcceptMode = 0
     private var cachedAllowParcels = true
     private var cachedAutomationEnabled = true
     private var cachedUpiSafeMode = false
     private var cachedScreenInteraction = true
     private var cachedRapidoEnabled = true
     private var cachedUberEnabled = true
-    private var cachedUserEmail = ""
 
     private val acceptedRides = mutableMapOf<String, Long>()
 
@@ -113,17 +110,14 @@ class RideAccessibilityService : AccessibilityService() {
     }
 
     private fun startSettingsCollector() {
-        val db = IAcceptDatabase.getDatabase(this)
         serviceScope.launch {
             launch { supabaseManager.subscriptionActive.collect { isSubscribed = it } }
             launch { preferenceManager.minFare.collect { cachedMinFare = it } }
             launch { preferenceManager.maxDistance.collect { cachedMaxDistance = it } }
             launch { preferenceManager.autoAcceptEnabled.collect { cachedAutoAccept = it } }
-            launch { preferenceManager.autoAcceptMode.collect { cachedAutoAcceptMode = it } }
             launch { preferenceManager.parcelFilter.collect { cachedAllowParcels = it } }
             launch { preferenceManager.rapidoEnabled.collect { cachedRapidoEnabled = it } }
             launch { preferenceManager.uberEnabled.collect { cachedUberEnabled = it } }
-            launch { db.dao().getProfile().collect { cachedUserEmail = it?.gmail ?: "" } }
             launch { 
                 preferenceManager.automationMaster.collect { 
                     cachedAutomationEnabled = it
@@ -200,11 +194,10 @@ class RideAccessibilityService : AccessibilityService() {
                     val match = filterEngine.checkMatch(rideInfo, cachedMinFare, cachedMaxDistance, cachedAllowParcels)
                     
                     if (match.isMatch) {
-                        if (cachedAutoAcceptMode == 1 && cachedScreenInteraction) {
+                        if (cachedAutoAccept && cachedScreenInteraction) {
                             if (performRobustClick(acceptNode)) {
                                 acceptedRides[rideInfo.fingerprint] = System.currentTimeMillis()
                                 serviceScope.launch(Dispatchers.Default) {
-                                    preferenceManager.addLog("ULTRA_SECURED: ₹${rideInfo.totalFare} ✅")
                                     handleSuccessfulAccept(rideInfo)
                                 }
                                 return 
@@ -216,7 +209,6 @@ class RideAccessibilityService : AccessibilityService() {
                         if (acceptedRides[rideInfo.fingerprint] == null) {
                             acceptedRides[rideInfo.fingerprint] = System.currentTimeMillis()
                             serviceScope.launch(Dispatchers.Default) {
-                                preferenceManager.addLog("AUTO_IGNORE: ₹${rideInfo.totalFare}")
                                 handleIgnoredRide(rideInfo, match.reason)
                             }
                         }
@@ -314,40 +306,7 @@ class RideAccessibilityService : AccessibilityService() {
     }
 
     private fun handleSuccessfulAccept(rideInfo: RideInfo) {
-        val rideTimestamp = System.currentTimeMillis()
-        
         triggerVisualAlert(rideInfo)
-
-        serviceScope.launch {
-            val db = IAcceptDatabase.getDatabase(this@RideAccessibilityService)
-            withContext(Dispatchers.IO) {
-                db.dao().insertRide(
-                    RideRecord(
-                        0, 
-                        cachedUserEmail,
-                        rideInfo.totalFare,
-                        rideInfo.totalDistance,
-                        rideInfo.pickupDistance,
-                        rideInfo.dropDistance,
-                        rideInfo.pickupAddress,
-                        rideInfo.dropAddress,
-                        "Ride Accepted",
-                        rideInfo.rawText,
-                        rideTimestamp,
-                        true,
-                        true 
-                    )
-                )
-                supabaseManager.saveRideToCloud(
-                    rideInfo.totalFare,
-                    rideInfo.pickupAddress,
-                    rideInfo.dropAddress,
-                    rideInfo.totalDistance,
-                    rideTimestamp
-                )
-            }
-        }
-        
         playCatSound()
         showSuccessNotification(rideInfo)
     }

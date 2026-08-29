@@ -92,11 +92,9 @@ class RideNotificationListener : NotificationListenerService() {
                     val isMatch = checkMatch(rideInfo, minFare, maxDistance, allowParcels)
                     CoreBridge.prime(rideInfo.fingerprint, isMatch)
                     
-                    preferenceManager.addLog("CORE PRIME: ₹${rideInfo.totalFare} (${if(isMatch) "MATCH" else "IGNORE"})")
                     handleRideRequest(rideInfo, sbn)
                 } else {
-                    // Match the user's expected log style from screenshot
-                    preferenceManager.addLog("CORE DETECT: $title\n(Parsing failed)")
+                    // Parsing failed - handled by logcat or ignored
                 }
         }
     }
@@ -128,9 +126,6 @@ class RideNotificationListener : NotificationListenerService() {
             val isMatch = checkMatch(rideInfo, minFare, maxDistance, allowParcels)
             val reason = getIgnoreReason(rideInfo, minFare, maxDistance, allowParcels)
             
-            val logPrefix = if (isMatch) "NOTIF MATCH" else "NOTIF IGNORE"
-            preferenceManager.addLog("$logPrefix: ₹${rideInfo.totalFare} ($reason)")
-
             showDetailedDetectNotification(rideInfo, isMatch, reason)
 
             if (isMatch) {

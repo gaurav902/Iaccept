@@ -13,6 +13,8 @@ data class ProfileRow(
     @SerialName("subscription_until") val cloudSubUntil: String? = null,
     @SerialName("referral_code") val cloudReferralCode: String? = null,
     @SerialName("paid_referrals_count") val paidReferralsCount: Int = 0,
+    @SerialName("vehicle_type") val vehicleType: String? = "bike",
+    @SerialName("vehicle_updated_at") val vehicleUpdatedAt: String? = null,
     @SerialName("live_lat") val liveLat: Double? = 0.0,
     @SerialName("live_lng") val liveLng: Double? = 0.0
 )
@@ -22,6 +24,7 @@ data class ProfileUpdate(
     @SerialName("username") val username: String? = null,
     @SerialName("phone") val phone: String? = null,
     @SerialName("home_address") val homeAddress: String? = null,
+    @SerialName("vehicle_type") val vehicleType: String? = null,
     @SerialName("live_lat") val liveLat: Double? = null,
     @SerialName("live_lng") val liveLng: Double? = null
 )
@@ -32,6 +35,7 @@ data class Plan(
     @SerialName("name") val name: String,
     @SerialName("days") val days: Int,
     @SerialName("price") val price: Int,
+    @SerialName("vehicle_type") val vehicleType: String = "bike",
     @SerialName("is_active") val isActive: Boolean = true
 )
 
@@ -77,12 +81,4 @@ data class SystemSettings(
     @SerialName("value") val value: String
 )
 
-@Serializable
-data class CloudRideHistory(
-    @SerialName("user_id") val userId: String,
-    @SerialName("fare") val fare: Int,
-    @SerialName("pickup_addr") val pickupAddr: String,
-    @SerialName("drop_addr") val dropAddr: String,
-    @SerialName("total_dist") val totalDist: Double? = 0.0,
-    @SerialName("timestamp") val timestamp: Long
-)
+

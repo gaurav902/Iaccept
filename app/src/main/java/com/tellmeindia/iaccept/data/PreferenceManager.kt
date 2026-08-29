@@ -6,9 +6,6 @@ import androidx.datastore.preferences.core.*
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
 
@@ -19,8 +16,6 @@ class PreferenceManager(private val context: Context) {
         val MAX_DISTANCE = doublePreferencesKey("max_distance")
         val AUTO_ACCEPT_ENABLED = booleanPreferencesKey("auto_accept_enabled")
         val SERVICE_ENABLED = booleanPreferencesKey("service_enabled")
-        val AUTO_ACCEPT_MODE = intPreferencesKey("auto_accept_mode") 
-        val LAST_NOTIFICATION = stringPreferencesKey("last_notification")
         val PARCEL_FILTER = booleanPreferencesKey("parcel_filter")
         val AUTOMATION_MASTER = booleanPreferencesKey("automation_master")
         val UPI_SAFE_MODE = booleanPreferencesKey("upi_safe_mode")
@@ -28,6 +23,17 @@ class PreferenceManager(private val context: Context) {
         val RAPIDO_ENABLED = booleanPreferencesKey("rapido_enabled")
         val UBER_ENABLED = booleanPreferencesKey("uber_enabled")
         val DISCLOSURE_ACCEPTED = booleanPreferencesKey("disclosure_accepted")
+        val THEME_MODE = intPreferencesKey("theme_mode") // 0: Auto, 1: Light, 2: Dark
+    }
+
+    val themeMode: Flow<Int> = context.dataStore.data.map { preferences ->
+        preferences[THEME_MODE] ?: 0
+    }
+
+    suspend fun updateThemeMode(mode: Int) {
+        context.dataStore.edit { preferences ->
+            preferences[THEME_MODE] = mode
+        }
     }
 
     val disclosureAccepted: Flow<Boolean> = context.dataStore.data.map { preferences ->
@@ -76,16 +82,8 @@ class PreferenceManager(private val context: Context) {
         preferences[AUTO_ACCEPT_ENABLED] ?: false
     }
 
-    val autoAcceptMode: Flow<Int> = context.dataStore.data.map { preferences ->
-        preferences[AUTO_ACCEPT_MODE] ?: 0
-    }
-
     val serviceEnabled: Flow<Boolean> = context.dataStore.data.map { preferences ->
         preferences[SERVICE_ENABLED] ?: false
-    }
-
-    val lastNotification: Flow<String> = context.dataStore.data.map { preferences ->
-        preferences[LAST_NOTIFICATION] ?: "SYSTEM: Elite Core Ready"
     }
 
     suspend fun updateMinFare(fare: Int) {
@@ -103,12 +101,6 @@ class PreferenceManager(private val context: Context) {
     suspend fun updateAutoAccept(enabled: Boolean) {
         context.dataStore.edit { preferences ->
             preferences[AUTO_ACCEPT_ENABLED] = enabled
-        }
-    }
-
-    suspend fun updateAutoAcceptMode(mode: Int) {
-        context.dataStore.edit { preferences ->
-            preferences[AUTO_ACCEPT_MODE] = mode
         }
     }
 
@@ -139,7 +131,8 @@ class PreferenceManager(private val context: Context) {
     suspend fun updateAutomationMaster(enabled: Boolean) {
         context.dataStore.edit { preferences ->
             preferences[AUTOMATION_MASTER] = enabled
-            preferences[SCREEN_INTERACTION] = enabled // Unified control
+            preferences[SCREEN_INTERACTION] = enabled
+            preferences[SERVICE_ENABLED] = enabled
             if (enabled) {
                 preferences[UPI_SAFE_MODE] = false
             }
@@ -152,6 +145,7 @@ class PreferenceManager(private val context: Context) {
             if (enabled) {
                 preferences[AUTOMATION_MASTER] = false
                 preferences[SCREEN_INTERACTION] = false
+                preferences[SERVICE_ENABLED] = false
             }
         }
     }
@@ -162,18 +156,6 @@ class PreferenceManager(private val context: Context) {
             if (enabled) {
                 preferences[UPI_SAFE_MODE] = false
             }
-        }
-    }
-
-    suspend fun addLog(text: String) {
-        context.dataStore.edit { preferences ->
-            val current = preferences[LAST_NOTIFICATION] ?: ""
-            val time = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
-            val newLog = "[$time] $text"
-            val list = if (current.isBlank()) mutableListOf() else current.split("\n").toMutableList()
-            list.add(0, newLog)
-            if (list.size > 8) list.removeAt(list.size - 1)
-            preferences[LAST_NOTIFICATION] = list.joinToString("\n")
         }
     }
 }

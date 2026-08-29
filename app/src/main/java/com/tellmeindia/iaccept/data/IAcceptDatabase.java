@@ -5,7 +5,7 @@ import androidx.room.Database;
 import androidx.room.Room;
 import androidx.room.RoomDatabase;
 
-@Database(entities = {RideRecord.class, UserProfile.class}, version = 8)
+@Database(entities = {UserProfile.class}, version = 12)
 public abstract class IAcceptDatabase extends RoomDatabase {
     public abstract IAcceptDao dao();
 

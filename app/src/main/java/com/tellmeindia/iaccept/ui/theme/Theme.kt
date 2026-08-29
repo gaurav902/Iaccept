@@ -1,8 +1,10 @@
 package com.tellmeindia.iaccept.ui.theme
 
 import android.app.Activity
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.graphics.Color
@@ -24,22 +26,38 @@ private val NeonColorScheme = darkColorScheme(
     outlineVariant = White10
 )
 
+private val LiteColorScheme = lightColorScheme(
+    primary = NeonBlue,
+    secondary = NeonPurple,
+    tertiary = NeonGreen,
+    background = LiteBackground,
+    surface = LiteSurface,
+    onPrimary = Color.White,
+    onSecondary = Color.White,
+    onTertiary = Color.White,
+    onBackground = LiteTextPrimary,
+    onSurface = LiteTextPrimary,
+    outlineVariant = LiteBorder
+)
+
 @Composable
 fun IacceptTheme(
-    darkTheme: Boolean = true, // Force Dark for Neon Look
+    darkTheme: Boolean = isSystemInDarkTheme(),
     content: @Composable () -> Unit
 ) {
+    val colorScheme = if (darkTheme) NeonColorScheme else LiteColorScheme
     val view = LocalView.current
+    
     if (!view.isInEditMode) {
         SideEffect {
             val window = (view.context as Activity).window
-            window.statusBarColor = NeonBackground.toArgb()
-            WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = false
+            window.statusBarColor = colorScheme.background.toArgb()
+            WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = !darkTheme
         }
     }
 
     MaterialTheme(
-        colorScheme = NeonColorScheme,
+        colorScheme = colorScheme,
         typography = Typography,
         content = content
     )

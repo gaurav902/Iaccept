@@ -23,6 +23,7 @@ import com.tellmeindia.iaccept.logic.MatchResult as RideMatchResult
 import kotlinx.coroutines.*
 import java.util.Date
 import java.util.Locale
+import java.util.Stack
 import java.text.SimpleDateFormat
 
 class RideAccessibilityService : AccessibilityService() {
@@ -158,24 +159,29 @@ class RideAccessibilityService : AccessibilityService() {
         if (isUberEvent && !cachedUberEnabled) return
 
         val currentTime = System.currentTimeMillis()
-        if (currentTime - lastScanTime < 100) return 
+        if (currentTime - lastScanTime < 50) return 
         lastScanTime = currentTime
 
+        serviceScope.launch(Dispatchers.Default) {
+            processEventOptimized(event)
+        }
+    }
+
+    private fun processEventOptimized(event: AccessibilityEvent) {
         val roots = mutableListOf<AccessibilityNodeInfo>()
         
-        // Use the event source directly (Fastest and most accurate for the specific app)
+        // SPEED OPTIMIZATION: Only use event.source if available. 
+        // windows.forEach is extremely slow and causes "late" notifications on Chinese phones.
         event.source?.let { roots.add(it) }
         
-        // Scan other windows only if they strictly belong to target apps
-        windows.forEach { win ->
-            win.root?.let { r ->
-                val rootPkg = r.packageName?.toString() ?: ""
-                if (rootPkg.contains("rapido", true) || rootPkg.contains("captain", true) || rootPkg.contains("uber", true)) {
-                    if (roots.none { it.windowId == r.windowId }) roots.add(r)
-                } else {
-                    r.recycle()
-                }
-            }
+        if (roots.isEmpty()) {
+            // Fallback only if necessary - windows call is expensive!
+            try {
+                windows.find { win ->
+                    val rootPkg = win.root?.packageName?.toString() ?: ""
+                    rootPkg.contains("rapido", true) || rootPkg.contains("captain", true) || rootPkg.contains("uber", true)
+                }?.root?.let { roots.add(it) }
+            } catch (e: Exception) {}
         }
 
         if (roots.isEmpty()) return
@@ -185,9 +191,7 @@ class RideAccessibilityService : AccessibilityService() {
             
             for (acceptNode in acceptNodes) {
                 val targetCard = findRideCardContainer(acceptNode)
-                val sb = StringBuilder()
-                collectAllText(targetCard, sb)
-                val capturedText = sb.toString()
+                val capturedText = collectAllTextOptimized(targetCard)
 
                 val rideInfo = filterEngine.parseNotification(capturedText)
                 if (rideInfo != null) {
@@ -197,7 +201,7 @@ class RideAccessibilityService : AccessibilityService() {
                         if (cachedAutoAccept && cachedScreenInteraction) {
                             if (performRobustClick(acceptNode)) {
                                 acceptedRides[rideInfo.fingerprint] = System.currentTimeMillis()
-                                serviceScope.launch(Dispatchers.Default) {
+                                serviceScope.launch(Dispatchers.Main) {
                                     handleSuccessfulAccept(rideInfo)
                                 }
                                 return 
@@ -208,7 +212,7 @@ class RideAccessibilityService : AccessibilityService() {
                     } else {
                         if (acceptedRides[rideInfo.fingerprint] == null) {
                             acceptedRides[rideInfo.fingerprint] = System.currentTimeMillis()
-                            serviceScope.launch(Dispatchers.Default) {
+                            serviceScope.launch(Dispatchers.Main) {
                                 handleIgnoredRide(rideInfo, match.reason)
                             }
                         }
@@ -216,6 +220,33 @@ class RideAccessibilityService : AccessibilityService() {
                 }
             }
         }
+    }
+
+    private fun collectAllTextOptimized(node: AccessibilityNodeInfo?): String {
+        if (node == null) return ""
+        val sb = StringBuilder()
+        val stack = Stack<AccessibilityNodeInfo>()
+        stack.push(node)
+        
+        while (stack.isNotEmpty()) {
+            val current = stack.pop()
+            val text = current.text
+            if (text != null) {
+                sb.append(text).append("|")
+            }
+            val desc = current.contentDescription
+            if (desc != null) {
+                sb.append(desc).append("|")
+            }
+            
+            for (i in 0 until current.childCount) {
+                val child = current.getChild(i)
+                if (child != null) {
+                    stack.push(child)
+                }
+            }
+        }
+        return sb.toString()
     }
 
     private fun findAllAcceptButtons(node: AccessibilityNodeInfo, list: MutableList<AccessibilityNodeInfo> = mutableListOf()): List<AccessibilityNodeInfo> {
@@ -346,14 +377,7 @@ class RideAccessibilityService : AccessibilityService() {
         manager.notify(SUCCESS_NOTIF_ID, notification)
     }
 
-    private fun collectAllText(node: AccessibilityNodeInfo?, sb: StringBuilder) {
-        if (node == null) return
-        node.text?.let { sb.append(it).append("|") }
-        node.contentDescription?.let { sb.append(it).append("|") }
-        for (i in 0 until node.childCount) {
-            collectAllText(node.getChild(i), sb)
-        }
-    }
+
 
     override fun onDestroy() {
         isServiceRunning = false

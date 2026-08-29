@@ -70,7 +70,7 @@ class RideNotificationListener : NotificationListenerService() {
         val isUber = packageName.contains("uber", true) || packageName.contains("driver", true)
         if (!isRapido && !isUber) return
 
-        serviceScope.launch {
+        serviceScope.launch(Dispatchers.Default) {
             // 2. ELITE PLATFORM TOGGLES
             val rapidoEnabled = preferenceManager.rapidoEnabled.first()
             val uberEnabled = preferenceManager.uberEnabled.first()
@@ -82,20 +82,18 @@ class RideNotificationListener : NotificationListenerService() {
             val text = extras.getString(Notification.EXTRA_TEXT) ?: ""
             val bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString() ?: ""
             
-                val rideInfo = nativeEngine.parseRide(title, "$title $text $bigText")
-                if (rideInfo != null) {
-                    // PRE-DECISION: Prime the core bridge
-                    val minFare = preferenceManager.minFare.first()
-                    val maxDistance = preferenceManager.maxDistance.first()
-                    val allowParcels = preferenceManager.parcelFilter.first()
-                    
-                    val isMatch = checkMatch(rideInfo, minFare, maxDistance, allowParcels)
-                    CoreBridge.prime(rideInfo.fingerprint, isMatch)
-                    
-                    handleRideRequest(rideInfo, sbn)
-                } else {
-                    // Parsing failed - handled by logcat or ignored
-                }
+            val rideInfo = nativeEngine.parseRide(title, "$title $text $bigText")
+            if (rideInfo != null) {
+                // PRE-DECISION: Prime the core bridge
+                val minFare = preferenceManager.minFare.first()
+                val maxDistance = preferenceManager.maxDistance.first()
+                val allowParcels = preferenceManager.parcelFilter.first()
+                
+                val isMatch = checkMatch(rideInfo, minFare, maxDistance, allowParcels)
+                CoreBridge.prime(rideInfo.fingerprint, isMatch)
+                
+                handleRideRequest(rideInfo, sbn)
+            }
         }
     }
 

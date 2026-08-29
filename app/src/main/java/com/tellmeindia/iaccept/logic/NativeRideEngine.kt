@@ -25,9 +25,16 @@ class NativeRideEngine {
         // RAPIDO SPECIFIC: If we see two fares and a '+', the native engine already extracted them.
         // We just need to ensure we don't miss them if symbols are weird.
         val finalFares = if (fares.isEmpty()) {
-            // High-speed fallback for ₹XXX + ₹YYY pattern
+            // High-speed fallback with deduplication
             val regex = Regex("(\\d{2,5})")
-            regex.findAll(cleanedText).map { it.groupValues[1].toIntOrNull() ?: 0 }.filter { it > 10 }.toList()
+            val allMatches = regex.findAll(cleanedText).map { it.groupValues[1].toIntOrNull() ?: 0 }.filter { it > 10 }.toList()
+            
+            if (cleanedText.contains("+")) {
+                // If there's a breakdown, prioritize the first two numbers (the base + extra)
+                allMatches.take(2)
+            } else {
+                allMatches.distinct()
+            }
         } else fares
 
         if (finalFares.isEmpty()) return null

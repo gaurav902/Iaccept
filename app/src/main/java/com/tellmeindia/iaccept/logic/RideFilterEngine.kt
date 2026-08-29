@@ -37,42 +37,43 @@ class RideFilterEngine {
         if (distanceMatches.isEmpty() && !lowerCombined.contains("parcel")) return null
         val allDistances = distanceMatches.map { it.groupValues[1].toDoubleOrNull() ?: 0.0 }
 
-        // 2. Fare Extraction (Summing all parts including added/extra)
-        val primaryFares = mutableListOf<Int>()
-        val seenFareValues = mutableSetOf<Int>()
+        // 2. Elite Fare Extraction (Smart Deduplication)
+        val linesForFare = text.split('|', '\n').map { it.trim() }.filter { it.isNotBlank() }
+        val breakdownFares = mutableListOf<Int>()
+        val extraFares = mutableListOf<Int>()
         
-        text.split('|', '\n').forEach { line ->
+        linesForFare.forEach { line ->
             val lower = line.lowercase()
-            // Ignore system meta-info but ALLOW "added" and "extra" to catch bonuses
-            if (!lower.contains("waiting") && !lower.contains("status")) {
-                fareRegex.findAll(line).forEach { match ->
-                    val v = match.groupValues[1].toDoubleOrNull()?.toInt() ?: 0
-                    // Accept any reasonable fare part
-                    if (v in 1..9999) {
-                        primaryFares.add(v)
-                        // Note: Not using seenFareValues set here to allow identical parts like ₹21 + ₹21
-                    }
+            // Ignore system meta-info
+            if (lower.contains("waiting") || lower.contains("status")) return@forEach
+            
+            val matches = fareRegex.findAll(line).map { it.groupValues[1].toDoubleOrNull()?.toInt() ?: 0 }.filter { it > 0 }.toList()
+            
+            if (line.contains("+") || matches.size >= 2) {
+                // Priority: Breakdown line (e.g. "₹43 + ₹10")
+                breakdownFares.addAll(matches)
+            } else if (lower.contains("added") || lower.contains("extra") || lower.contains("bonus")) {
+                // Potential duplicates line (e.g. "Customer added ₹10.0 extra")
+                extraFares.addAll(matches)
+            } else if (matches.isNotEmpty()) {
+                // Normal fare line - only add if we don't have a breakdown yet
+                if (breakdownFares.isEmpty()) {
+                    breakdownFares.addAll(matches)
                 }
             }
         }
         
-        // Handle the case where no ₹ symbol is used but there is a + pattern (e.g. 21 + 1)
-        if (primaryFares.size < 2 && text.contains("+")) {
-            val plusPattern = Regex("(\\d+)\\s?\\+\\s?(\\d+)")
-            plusPattern.find(text)?.let { match ->
-                val v1 = match.groupValues[1].toIntOrNull() ?: 0
-                val v2 = match.groupValues[2].toIntOrNull() ?: 0
-                if (primaryFares.isEmpty()) {
-                    primaryFares.add(v1)
-                    primaryFares.add(v2)
-                } else if (primaryFares.size == 1 && primaryFares[0] == v1) {
-                    primaryFares.add(v2)
-                }
+        // Consolidate: Add extra parts ONLY if not already in the breakdown
+        val finalFares = breakdownFares.toMutableList()
+        extraFares.forEach { extra ->
+            // If the extra value (like 10) is already part of the breakdown, don't add it again
+            if (!finalFares.contains(extra)) {
+                finalFares.add(extra)
             }
         }
         
-        if (primaryFares.isEmpty()) return null
-        val totalFare = primaryFares.sum()
+        if (finalFares.isEmpty()) return null
+        val totalFare = finalFares.sum()
 
         // 3. Distance Allocation
         var pickupDist = 0.0
@@ -88,7 +89,7 @@ class RideFilterEngine {
         // 4. Elite Address Discovery (Strict Filtering)
         val lines = text.split('|', '\n').map { it.trim() }.filter { it.isNotBlank() }
         val addressCandidates = lines.filter { 
-            it.length > 12 && 
+            it.length > 8 && 
             !it.contains('₹') && 
             !it.lowercase().contains("km") &&
             !it.lowercase().contains("mi") &&
@@ -103,7 +104,9 @@ class RideFilterEngine {
             !it.lowercase().contains("waiting") &&
             !it.lowercase().contains("battery") &&
             !it.lowercase().contains("signal") &&
-            !it.lowercase().contains("system")
+            !it.lowercase().contains("system") &&
+            !it.lowercase().contains("cash") &&
+            !it.lowercase().contains("online")
         }
 
         var pickupAddr = "Location Discovery Failed"
@@ -126,7 +129,7 @@ class RideFilterEngine {
 
         val fingerprint = "${totalFare}_${pickupDist}_${dropDist}_${pickupAddr.take(5)}"
         return RideInfo(
-            fares = primaryFares,
+            fares = finalFares,
             pickupDistance = pickupDist,
             dropDistance = dropDist,
             pickupAddress = pickupAddr,

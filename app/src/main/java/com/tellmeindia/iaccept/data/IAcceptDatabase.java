@@ -17,6 +17,7 @@ public abstract class IAcceptDatabase extends RoomDatabase {
                 if (INSTANCE == null) {
                     INSTANCE = Room.databaseBuilder(context.getApplicationContext(),
                             IAcceptDatabase.class, "iaccept_db")
+                            .setJournalMode(RoomDatabase.JournalMode.TRUNCATE)
                             .fallbackToDestructiveMigration()
                             .build();
                 }

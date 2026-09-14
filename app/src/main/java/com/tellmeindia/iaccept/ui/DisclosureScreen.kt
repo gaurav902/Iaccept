@@ -6,8 +6,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Security
-import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
@@ -35,7 +35,7 @@ fun DisclosureScreen(onAccept: () -> Unit) {
     ) {
         Spacer(modifier = Modifier.height(48.dp))
         Icon(
-            Icons.Default.Security,
+            Icons.Default.Lock,
             contentDescription = null,
             tint = NeonBlue,
             modifier = Modifier.size(80.dp)
@@ -59,7 +59,7 @@ fun DisclosureScreen(onAccept: () -> Unit) {
         Spacer(modifier = Modifier.height(32.dp))
         
         DisclosureItem(
-            icon = Icons.Default.Visibility,
+            icon = Icons.Default.Info,
             title = "What we read",
             description = "We only read ride-related details (fare, distance, addresses) from Rapido and Uber driver apps when they appear on your screen."
         )
@@ -71,7 +71,7 @@ fun DisclosureScreen(onAccept: () -> Unit) {
         )
 
         DisclosureItem(
-            icon = Icons.Default.Security,
+            icon = Icons.Default.Lock,
             title = "Data Safety",
             description = "We do NOT collect, store, or share your personal data, messages, or payment information. All ride analysis happens locally on your device."
         )

@@ -6,7 +6,6 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CardMembership
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -43,7 +42,7 @@ fun PlanSelectionScreen(onPlanSelected: (String) -> Unit) {
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Icon(
-                Icons.Default.CardMembership,
+                Icons.Default.Star,
                 null,
                 tint = Color.Cyan,
                 modifier = Modifier.size(48.dp)

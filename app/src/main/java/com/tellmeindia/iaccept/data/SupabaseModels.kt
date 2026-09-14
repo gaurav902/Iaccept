@@ -81,4 +81,25 @@ data class SystemSettings(
     @SerialName("value") val value: String
 )
 
+@Serializable
+data class AdminNotification(
+    @SerialName("id") val id: String? = null,
+    @SerialName("user_id") val userId: String? = null,
+    @SerialName("title") val title: String,
+    @SerialName("message") val message: String,
+    @SerialName("target_screen") val targetScreen: String? = "home",
+    @SerialName("created_at") val createdAt: String? = null
+)
+
+@Serializable
+data class AppUpdate(
+    @SerialName("id") val id: String? = null,
+    @SerialName("version_code") val versionCode: Int,
+    @SerialName("version_name") val versionName: String,
+    @SerialName("apk_url") val apkUrl: String,
+    @SerialName("release_notes") val releaseNotes: String? = "",
+    @SerialName("is_force_update") val isForceUpdate: Boolean = false,
+    @SerialName("created_at") val createdAt: String? = null
+)
+
 

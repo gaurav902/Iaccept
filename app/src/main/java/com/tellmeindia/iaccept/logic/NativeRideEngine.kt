@@ -4,37 +4,66 @@ import android.util.Log
 
 class NativeRideEngine {
     companion object {
+        var isLibraryLoaded = false
+            private set
+
         init {
             try {
                 System.loadLibrary("iaccept_core")
-            } catch (e: Exception) {
-                Log.e("NativeRideEngine", "Failed to load library", e)
+                isLibraryLoaded = true
+            } catch (e: Throwable) {
+                Log.e("NativeRideEngine", "Failed to load native library: ${e.message}")
+                isLibraryLoaded = false
             }
         }
     }
 
-    external fun extractFares(text: String): IntArray
-    external fun extractDistances(text: String): DoubleArray
+    external fun optimizeHardwareSpeedNative(isHighEnd: Boolean)
+    external fun fastExtractFaresBuffer(directBuffer: java.nio.ByteBuffer, length: Int): IntArray
+    external fun extractFaresNative(text: String): IntArray
+    external fun extractDistancesNative(text: String): DoubleArray
+
+    fun optimizeHardwareSpeed(context: android.content.Context) {
+        if (isLibraryLoaded) {
+            try {
+                val isHighEnd = HardwareDetector.getHardwareTier(context) == HardwareTier.HIGH_END
+                optimizeHardwareSpeedNative(isHighEnd)
+            } catch (e: Throwable) { }
+        }
+    }
+
+    fun extractFares(text: String): IntArray {
+        return if (isLibraryLoaded) {
+            try {
+                extractFaresNative(text)
+            } catch (e: Throwable) {
+                intArrayOf()
+            }
+        } else {
+            intArrayOf()
+        }
+    }
+
+    fun extractDistances(text: String): DoubleArray {
+        return if (isLibraryLoaded) {
+            try {
+                extractDistancesNative(text)
+            } catch (e: Throwable) {
+                doubleArrayOf()
+            }
+        } else {
+            doubleArrayOf()
+        }
+    }
 
     fun parseRide(source: String, text: String): RideInfo? {
-        // 1. CLEAN RAW DATA: Rapido often sends fares with multi-byte symbols and '+'
         val cleanedText = text.replace("|", " ").replace("\n", " ")
         
         val fares = extractFares(cleanedText).toList()
-        
-        // RAPIDO SPECIFIC: If we see two fares and a '+', the native engine already extracted them.
-        // We just need to ensure we don't miss them if symbols are weird.
         val finalFares = if (fares.isEmpty()) {
-            // High-speed fallback with deduplication
-            val regex = Regex("(\\d{2,5})")
-            val allMatches = regex.findAll(cleanedText).map { it.groupValues[1].toIntOrNull() ?: 0 }.filter { it > 10 }.toList()
-            
-            if (cleanedText.contains("+")) {
-                // If there's a breakdown, prioritize the first two numbers (the base + extra)
-                allMatches.take(2)
-            } else {
-                allMatches.distinct()
-            }
+            val regex = Regex("(?:₹|Rs\\.?|INR|\\$)\\s?(\\d+(?:\\.\\d+)?)", RegexOption.IGNORE_CASE)
+            val allMatches = regex.findAll(cleanedText).map { it.groupValues[1].toIntOrNull() ?: 0 }.filter { it in 10..9999 }.toList()
+            if (cleanedText.contains("+") && allMatches.size >= 2) allMatches.take(2) else if (allMatches.isNotEmpty()) listOf(allMatches.maxOrNull() ?: 0) else emptyList()
         } else fares
 
         if (finalFares.isEmpty()) return null
@@ -43,10 +72,7 @@ class NativeRideEngine {
         var pDist = 0.0
         var dDist = 0.0
         
-        // Multi-Distance detection (Pickup vs Drop)
         if (distances.size >= 2) {
-            // Usually Rapido shows: [Pickup Dist, Drop Dist] or [Total Dist]
-            // In your screenshot: 0 km (pickup) and 36.9 km (drop)
             pDist = distances[0]
             dDist = distances[1]
         } else if (distances.size == 1) {
@@ -54,10 +80,20 @@ class NativeRideEngine {
             if (cleanedText.lowercase().contains("total") || d > 10.0) dDist = d else pDist = d
         }
 
-        // Address Discovery with Meta-Data awareness
-        val segments = cleanedText.split("  ").map { it.trim() }.filter { it.length > 5 }
-        val pAddr = segments.find { it.length > 15 && !it.contains("₹") } ?: "Detecting..."
-        val dAddr = segments.findLast { it.length > 15 && !it.contains("₹") } ?: "Detecting..."
+        // Smart Address Discovery with Uniqueness
+        val segments = cleanedText.split(Regex("\\s{2,}")).map { it.trim() }.filter { 
+            it.length > 5 && !it.contains("₹") && !it.lowercase().contains("km") 
+        }
+        
+        var pAddr = "Detecting..."
+        var dAddr = "Detecting..."
+        
+        if (segments.size >= 2) {
+            pAddr = segments[0]
+            dAddr = segments[1]
+        } else if (segments.size == 1) {
+            pAddr = segments[0]
+        }
         
         val isParcel = cleanedText.lowercase().contains("parcel") || cleanedText.lowercase().contains("delivery")
 

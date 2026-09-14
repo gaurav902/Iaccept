@@ -25,8 +25,15 @@ class RideFilterEngine {
 
     companion object {
         private const val TAG = "RideFilterEngine"
-        private val fareRegex = Regex("₹\\s?(\\d+(?:\\.\\d+)?)")
-        private val distanceRegex = Regex("(\\d+(?:\\.\\d+)?)\\s?(?:km|mi)", RegexOption.IGNORE_CASE)
+        private val fareRegex = Regex("(?:₹|Rs\\.?|INR|\\$)\\s?(\\d+(?:\\.\\d+)?)", RegexOption.IGNORE_CASE)
+        private val distanceRegex = Regex("(\\d+(?:\\.\\d+)?)\\s?(?:km|mi|miles)", RegexOption.IGNORE_CASE)
+        
+        private val ignoreKeywords = listOf(
+            "accept", "captain", "uber", "rapido", "notification", "control", "center", 
+            "status", "waiting", "battery", "signal", "system", "cash", "online",
+            "waiting for orders", "km", "mi", "min", "sec", "hrs",
+            "home", "orders", "order", "go to", "filter", "refer", "performance", "follow", "cab", "bike", "auto"
+        )
     }
 
     fun parseNotification(text: String): RideInfo? {
@@ -37,42 +44,29 @@ class RideFilterEngine {
         if (distanceMatches.isEmpty() && !lowerCombined.contains("parcel")) return null
         val allDistances = distanceMatches.map { it.groupValues[1].toDoubleOrNull() ?: 0.0 }
 
-        // 2. Elite Fare Extraction (Smart Deduplication)
-        val linesForFare = text.split('|', '\n').map { it.trim() }.filter { it.isNotBlank() }
-        val breakdownFares = mutableListOf<Int>()
-        val extraFares = mutableListOf<Int>()
+        // 2. Ultra-Elite Fare Extraction
+        val lines = text.split('|', '\n').map { it.trim() }.filter { it.isNotBlank() }
+        val finalFares = mutableListOf<Int>()
         
-        linesForFare.forEach { line ->
-            val lower = line.lowercase()
-            // Ignore system meta-info
-            if (lower.contains("waiting") || lower.contains("status")) return@forEach
-            
-            val matches = fareRegex.findAll(line).map { it.groupValues[1].toDoubleOrNull()?.toInt() ?: 0 }.filter { it > 0 }.toList()
-            
-            if (line.contains("+") || matches.size >= 2) {
-                // Priority: Breakdown line (e.g. "₹43 + ₹10")
-                breakdownFares.addAll(matches)
-            } else if (lower.contains("added") || lower.contains("extra") || lower.contains("bonus")) {
-                // Potential duplicates line (e.g. "Customer added ₹10.0 extra")
-                extraFares.addAll(matches)
-            } else if (matches.isNotEmpty()) {
-                // Normal fare line - only add if we don't have a breakdown yet
-                if (breakdownFares.isEmpty()) {
-                    breakdownFares.addAll(matches)
-                }
+        val allSingleFares = fareRegex.findAll(text).map { it.groupValues[1].toDoubleOrNull()?.toInt() ?: 0 }.filter { it in 10..9999 }.toList()
+        
+        if (text.contains("+") && allSingleFares.size >= 2) {
+            // Breakdown line: e.g. ₹38 + ₹16 -> take the two breakdown numbers
+            finalFares.addAll(allSingleFares.take(2))
+        } else if (allSingleFares.isNotEmpty()) {
+            finalFares.add(allSingleFares.maxOrNull() ?: 0)
+        } else {
+            // Fallback for numbers without explicit currency symbol (excluding pincodes > 9999)
+            val numRegex = Regex("(\\d{2,4})")
+            val rawNums = numRegex.findAll(text).map { it.groupValues[1].toIntOrNull() ?: 0 }.filter { it in 10..9999 }.toList()
+            if (text.contains("+") && rawNums.size >= 2) {
+                finalFares.addAll(rawNums.take(2))
+            } else if (rawNums.isNotEmpty()) {
+                finalFares.add(rawNums.maxOrNull() ?: 0)
             }
         }
         
-        // Consolidate: Add extra parts ONLY if not already in the breakdown
-        val finalFares = breakdownFares.toMutableList()
-        extraFares.forEach { extra ->
-            // If the extra value (like 10) is already part of the breakdown, don't add it again
-            if (!finalFares.contains(extra)) {
-                finalFares.add(extra)
-            }
-        }
-        
-        if (finalFares.isEmpty()) return null
+        if (finalFares.isEmpty() || finalFares.sum() == 0) return null
         val totalFare = finalFares.sum()
 
         // 3. Distance Allocation
@@ -86,48 +80,37 @@ class RideFilterEngine {
             if (d > 4.0 || lowerCombined.contains("total")) dropDist = d else pickupDist = d
         }
 
-        // 4. Elite Address Discovery (Strict Filtering)
-        val lines = text.split('|', '\n').map { it.trim() }.filter { it.isNotBlank() }
-        val addressCandidates = lines.filter { 
-            it.length > 8 && 
-            !it.contains('₹') && 
-            !it.lowercase().contains("km") &&
-            !it.lowercase().contains("mi") &&
-            !it.lowercase().contains("accept") && 
-            !it.lowercase().contains("captain") &&
-            !it.lowercase().contains("uber") &&
-            !it.lowercase().contains("rapido") &&
-            !it.lowercase().contains("notification") &&
-            !it.lowercase().contains("control") &&
-            !it.lowercase().contains("center") &&
-            !it.lowercase().contains("status") &&
-            !it.lowercase().contains("waiting") &&
-            !it.lowercase().contains("battery") &&
-            !it.lowercase().contains("signal") &&
-            !it.lowercase().contains("system") &&
-            !it.lowercase().contains("cash") &&
-            !it.lowercase().contains("online")
-        }
-
-        var pickupAddr = "Location Discovery Failed"
-        var dropAddr = "Destination Discovery Failed"
-        
-        if (addressCandidates.size >= 2) {
-            pickupAddr = addressCandidates[0]
-            dropAddr = addressCandidates[1]
-        } else if (addressCandidates.size == 1) {
-            pickupAddr = addressCandidates[0]
-        }
-
-        // Smart Fallback for "to" format
-        if (dropAddr.contains("Failed") && lowerCombined.contains(" to ")) {
-            val toIdx = lines.indexOfFirst { it.lowercase() == "to" }
-            if (toIdx != -1 && toIdx + 1 < lines.size) {
-                dropAddr = lines[toIdx + 1]
+        // 4. Address Discovery
+        val addressCandidates = mutableListOf<String>()
+        lines.forEach { line ->
+            val lowLine = line.lowercase()
+            val hasFare = line.contains('₹') || lowLine.contains("rs") || lowLine.contains("inr")
+            val isDistanceOnly = distanceRegex.matches(line) || (lowLine.contains("km") && line.length < 10)
+            val containsSystemKeyword = ignoreKeywords.any { 
+                lowLine == it || lowLine.startsWith("$it ") || lowLine.endsWith(" $it") || lowLine.contains(" $it ")
+            }
+            
+            if (line.length >= 5 && !hasFare && !isDistanceOnly && !containsSystemKeyword) {
+                if (lowLine != "accept" && lowLine != "reject" && !lowLine.contains("waiting for orders") && !lowLine.contains("order")) {
+                    addressCandidates.add(line)
+                }
             }
         }
 
-        val fingerprint = "${totalFare}_${pickupDist}_${dropDist}_${pickupAddr.take(5)}"
+        var pickupAddr = "Detecting..."
+        var dropAddr = "Detecting..."
+        if (addressCandidates.isNotEmpty()) {
+            val uniqueCandidates = addressCandidates.distinct()
+            if (uniqueCandidates.size >= 2) {
+                pickupAddr = uniqueCandidates[0]
+                dropAddr = uniqueCandidates[1]
+            } else {
+                pickupAddr = uniqueCandidates[0]
+            }
+        }
+
+        val fingerprint = "${totalFare}_${pickupDist}_${dropDist}_${pickupAddr.take(5)}_${System.currentTimeMillis()/30000}"
+        
         return RideInfo(
             fares = finalFares,
             pickupDistance = pickupDist,
@@ -141,22 +124,14 @@ class RideFilterEngine {
     }
 
     fun checkMatch(info: RideInfo, minFare: Int, maxDistance: Double, allowParcels: Boolean = true): MatchResult {
-        if (!allowParcels && info.isParcel) {
-            return MatchResult(false, "IGNORE: Parcel ride (Disabled)")
-        }
-
-        if (info.totalFare < 10) {
-            return MatchResult(false, "Fare too low (Safety floor)")
-        }
-        
-        if (info.totalFare < minFare) {
+        if (!allowParcels && info.isParcel) return MatchResult(false, "IGNORE: Parcel ride")
+        if (info.totalFare < 5) return MatchResult(false, "Fare too low")
+        if (minFare > 0 && info.totalFare < minFare) {
             return MatchResult(false, "Fare ₹${info.totalFare} < Min ₹$minFare")
         }
-        
-        if (info.totalDistance > maxDistance) {
+        if (maxDistance > 0 && info.totalDistance > maxDistance) {
             return MatchResult(false, "Distance ${info.totalDistance}km > Max ${maxDistance}km")
         }
-
-        return MatchResult(true, "Match Success: ₹${info.totalFare} | ${info.totalDistance}km")
+        return MatchResult(true, "Match Success: ₹${info.totalFare}")
     }
 }

@@ -24,6 +24,8 @@ import kotlinx.coroutines.*
 import java.util.Date
 import java.util.Locale
 import java.util.Stack
+import java.util.LinkedList
+import java.util.Deque
 import java.text.SimpleDateFormat
 
 class RideAccessibilityService : AccessibilityService() {
@@ -38,6 +40,19 @@ class RideAccessibilityService : AccessibilityService() {
         
         var isServiceRunning = false
             private set
+
+        val acceptedRides = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+        fun markRideAccepted(fingerprint: String) {
+            if (fingerprint.isNotBlank()) {
+                acceptedRides[fingerprint] = System.currentTimeMillis()
+            }
+        }
+
+        fun isRideRecentlyAccepted(fingerprint: String): Boolean {
+            val timestamp = acceptedRides[fingerprint] ?: return false
+            return (System.currentTimeMillis() - timestamp) < 30000
+        }
     }
 
     private lateinit var preferenceManager: PreferenceManager
@@ -57,13 +72,23 @@ class RideAccessibilityService : AccessibilityService() {
     private var cachedRapidoEnabled = true
     private var cachedUberEnabled = true
 
-    private val acceptedRides = mutableMapOf<String, Long>()
-
     override fun onServiceConnected() {
         super.onServiceConnected()
         isServiceRunning = true
-        createNotificationChannels()
-        refreshForegroundNotification()
+        try {
+            createNotificationChannels()
+            refreshForegroundNotification()
+        } catch (e: Throwable) { }
+
+        // 1. Hardware Speed: Bind scanning thread to Prime CPU Cores + Lock RAM
+        try {
+            com.tellmeindia.iaccept.logic.NativeRideEngine().optimizeHardwareSpeed(this)
+        } catch (e: Throwable) { }
+
+        // 2. Cellular Speed: Start 5G Modem Radio Pre-warmer
+        try {
+            com.tellmeindia.iaccept.logic.RadioPrewarmer.startPrewarming(serviceScope)
+        } catch (e: Throwable) { }
     }
 
     private fun refreshForegroundNotification() {
@@ -85,7 +110,12 @@ class RideAccessibilityService : AccessibilityService() {
             } else {
                 startForeground(NOTIF_ID, notification)
             }
-        } catch (e: Exception) { }
+        } catch (e: Throwable) {
+            try {
+                val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                manager.notify(NOTIF_ID, notification)
+            } catch (ex: Throwable) { }
+        }
     }
 
 
@@ -129,9 +159,7 @@ class RideAccessibilityService : AccessibilityService() {
                 preferenceManager.upiSafeMode.collect { 
                     cachedUpiSafeMode = it
                     refreshForegroundNotification()
-                    if (it) {
-                        disableSelf()
-                    }
+                    if (it) disableSelf()
                 } 
             }
             launch {
@@ -144,38 +172,40 @@ class RideAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
-        if (!cachedAutomationEnabled || cachedUpiSafeMode || !isSubscribed) return
+        try {
+            if (!cachedAutomationEnabled || cachedUpiSafeMode || !isSubscribed) return
 
-        // 1. STRICT PACKAGE FILTER (Only Uber and Rapido)
-        val eventPkg = event.packageName?.toString() ?: ""
-        val isRapidoEvent = eventPkg.contains("rapido", true) || eventPkg.contains("captain", true)
-        val isUberEvent = eventPkg.contains("uber", true)
+            val eventPkg = event.packageName?.toString() ?: ""
+            val isRapidoEvent = eventPkg.contains("rapido", true) || eventPkg.contains("captain", true)
+            val isUberEvent = eventPkg.contains("uber", true)
 
-        // Completely ignore if not from target apps (Prevents scanning system UI/notifications)
-        if (!isRapidoEvent && !isUberEvent) return
+            if (!isRapidoEvent && !isUberEvent) return
+            if (isRapidoEvent && !cachedRapidoEnabled) return
+            if (isUberEvent && !cachedUberEnabled) return
 
-        // 2. User preference toggle check
-        if (isRapidoEvent && !cachedRapidoEnabled) return
-        if (isUberEvent && !cachedUberEnabled) return
+            val isHighEnd = com.tellmeindia.iaccept.logic.HardwareDetector.getHardwareTier(this) == com.tellmeindia.iaccept.logic.HardwareTier.HIGH_END
+            val throttleInterval = if (isHighEnd) 30L else 120L
 
-        val currentTime = System.currentTimeMillis()
-        if (currentTime - lastScanTime < 50) return 
-        lastScanTime = currentTime
+            val currentTime = System.currentTimeMillis()
+            if (currentTime - lastScanTime < throttleInterval) return
+            lastScanTime = currentTime
 
-        serviceScope.launch(Dispatchers.Default) {
-            processEventOptimized(event)
-        }
+            serviceScope.launch(Dispatchers.Default) {
+                try {
+                    processEventOptimized(event)
+                } catch (e: Throwable) { }
+            }
+        } catch (e: Throwable) { }
     }
 
     private fun processEventOptimized(event: AccessibilityEvent) {
         val roots = mutableListOf<AccessibilityNodeInfo>()
         
-        // SPEED OPTIMIZATION: Only use event.source if available. 
-        // windows.forEach is extremely slow and causes "late" notifications on Chinese phones.
+        // Use event source as first priority (Fastest)
         event.source?.let { roots.add(it) }
         
         if (roots.isEmpty()) {
-            // Fallback only if necessary - windows call is expensive!
+            // Low-latency fallback for windows
             try {
                 windows.find { win ->
                     val rootPkg = win.root?.packageName?.toString() ?: ""
@@ -195,6 +225,9 @@ class RideAccessibilityService : AccessibilityService() {
 
                 val rideInfo = filterEngine.parseNotification(capturedText)
                 if (rideInfo != null) {
+                    if (isRideRecentlyAccepted(rideInfo.fingerprint)) {
+                        return
+                    }
                     val match = filterEngine.checkMatch(rideInfo, cachedMinFare, cachedMaxDistance, cachedAllowParcels)
                     
                     if (match.isMatch) {
@@ -225,25 +258,22 @@ class RideAccessibilityService : AccessibilityService() {
     private fun collectAllTextOptimized(node: AccessibilityNodeInfo?): String {
         if (node == null) return ""
         val sb = StringBuilder()
-        val stack = Stack<AccessibilityNodeInfo>()
-        stack.push(node)
+        // Use a Queue (FIFO) to preserve top-to-bottom visual order of the screen
+        val queue: Deque<AccessibilityNodeInfo> = LinkedList()
+        queue.add(node)
         
-        while (stack.isNotEmpty()) {
-            val current = stack.pop()
+        while (queue.isNotEmpty()) {
+            val current = queue.removeFirst()
             val text = current.text
-            if (text != null) {
-                sb.append(text).append("|")
-            }
+            if (text != null) sb.append(text).append("|")
             val desc = current.contentDescription
-            if (desc != null) {
-                sb.append(desc).append("|")
-            }
+            if (desc != null) sb.append(desc).append("|")
             
             for (i in 0 until current.childCount) {
-                val child = current.getChild(i)
-                if (child != null) {
-                    stack.push(child)
-                }
+                current.getChild(i)?.let { queue.addLast(it) }
+            }
+            if (current != node) {
+                try { current.recycle() } catch (e: Exception) {}
             }
         }
         return sb.toString()
@@ -265,14 +295,22 @@ class RideAccessibilityService : AccessibilityService() {
     }
 
     private fun performRobustClick(node: AccessibilityNodeInfo): Boolean {
-        if (node.isClickable && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+        var clicked = false
+        if (node.isClickable) {
+            clicked = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        }
         
-        var p = node.parent
-        var depth = 0
-        while (p != null && depth < 4) {
-            if (p.isClickable && p.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
-            p = p.parent
-            depth++
+        if (!clicked) {
+            var p = node.parent
+            var depth = 0
+            while (p != null && depth < 4) {
+                if (p.isClickable && p.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                    clicked = true
+                    break
+                }
+                p = p.parent
+                depth++
+            }
         }
         
         val rect = android.graphics.Rect()
@@ -280,19 +318,27 @@ class RideAccessibilityService : AccessibilityService() {
         val x = rect.centerX().toFloat()
         val y = rect.centerY().toFloat()
         
-        val path = android.graphics.Path()
-        path.moveTo(x, y)
-        val gesture = android.accessibilityservice.GestureDescription.Builder()
-            .addStroke(android.accessibilityservice.GestureDescription.StrokeDescription(path, 0, 40))
-            .build()
-        return dispatchGesture(gesture, null, null)
+        if (x > 0 && y > 0) {
+            val path = android.graphics.Path()
+            path.moveTo(x, y)
+            val gesture = android.accessibilityservice.GestureDescription.Builder()
+                .addStroke(android.accessibilityservice.GestureDescription.StrokeDescription(path, 0, 1)) // 1ms Ultra-Fast Tap
+                .build()
+            val gestureDispatched = dispatchGesture(gesture, null, null)
+            if (gestureDispatched) clicked = true
+        }
+
+        return clicked
     }
 
     private fun findRideCardContainer(button: AccessibilityNodeInfo): AccessibilityNodeInfo {
         var current: AccessibilityNodeInfo? = button
         var depth = 0
-        while (current != null && depth < 6) {
-            if (current.childCount > 3) return current
+        while (current != null && depth < 8) {
+            val text = collectAllTextOptimized(current)
+            if (text.contains("km") || text.contains("mi")) {
+                return current
+            }
             current = current.parent
             depth++
         }
@@ -325,14 +371,17 @@ class RideAccessibilityService : AccessibilityService() {
             .setStyle(NotificationCompat.BigTextStyle()
                 .setBigContentTitle("Ride Details (Filtered)")
                 .bigText("💰 FARE: $fareBreakdown ($totalFareText)\n" +
+                         "🛣️ DIST: ${rideInfo.pickupDistance} km + ${rideInfo.dropDistance} km\n" +
                          "📍 FROM: ${rideInfo.pickupAddress}\n" +
                          "🏁 TO: ${rideInfo.dropAddress}\n\n" +
                          "🚫 REASON: $reason"))
             .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setTimeoutAfter(8000L)
             .setAutoCancel(true)
             .build()
 
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        try { manager.cancelAll() } catch (e: Exception) { }
         manager.notify(IGNORE_NOTIF_ID, notification)
     }
 
@@ -362,7 +411,7 @@ class RideAccessibilityService : AccessibilityService() {
             .setStyle(NotificationCompat.BigTextStyle()
                 .setBigContentTitle("NEW RIDE SECURED! ✅")
                 .bigText("💰 FARE: $fareBreakdown ($totalFareText)\n" +
-                         "🛣️ TOTAL: ${rideInfo.totalDistance} km\n\n" +
+                         "🛣️ DIST: ${rideInfo.pickupDistance} km (P) + ${rideInfo.dropDistance} km (D)\n\n" +
                          "📍 FROM: ${rideInfo.pickupAddress}\n" +
                          "🏁 TO: ${rideInfo.dropAddress}\n\n" +
                          "Drive safe, Captain! 🛣️💨"))
@@ -370,14 +419,14 @@ class RideAccessibilityService : AccessibilityService() {
             .setCategory(NotificationCompat.CATEGORY_ALARM)
             .setVibrate(longArrayOf(0, 400, 100, 400))
             .setDefaults(Notification.DEFAULT_ALL)
+            .setTimeoutAfter(15000L)
             .setAutoCancel(true)
             .build()
 
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        try { manager.cancelAll() } catch (e: Exception) { }
         manager.notify(SUCCESS_NOTIF_ID, notification)
     }
-
-
 
     override fun onDestroy() {
         isServiceRunning = false

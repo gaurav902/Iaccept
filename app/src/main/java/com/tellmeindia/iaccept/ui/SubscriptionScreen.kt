@@ -13,10 +13,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.Payment
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -89,7 +89,7 @@ fun SubscriptionScreen(
             ) {
                 Row(modifier = Modifier.padding(24.dp), verticalAlignment = Alignment.CenterVertically) {
                     Box(modifier = Modifier.size(56.dp).clip(CircleShape).background(if (isSubscribed) NeonGreen.copy(alpha = 0.1f) else NeonBlue.copy(alpha = 0.1f)), contentAlignment = Alignment.Center) {
-                        Icon(if (isSubscribed) Icons.Default.CheckCircle else Icons.Default.Payment, null, tint = if (isSubscribed) NeonGreen else NeonBlue, modifier = Modifier.size(28.dp))
+                        Icon(if (isSubscribed) Icons.Default.CheckCircle else Icons.Default.Check, null, tint = if (isSubscribed) NeonGreen else NeonBlue, modifier = Modifier.size(28.dp))
                     }
                     Spacer(modifier = Modifier.width(20.dp))
                     Column {
@@ -150,7 +150,7 @@ fun PlanItemPremium(plan: Plan, isSelected: Boolean, onPayClick: () -> Unit, onC
         Column(modifier = Modifier.padding(20.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(modifier = Modifier.size(48.dp).clip(CircleShape).background(if (plan.days > 7) NeonPurple.copy(alpha = 0.1f) else NeonBlue.copy(alpha = 0.1f)), contentAlignment = Alignment.Center) {
-                    Icon(if (plan.days > 7) Icons.Default.Star else Icons.Default.Payment, null, tint = if (plan.days > 7) NeonPurple else NeonBlue)
+                    Icon(if (plan.days > 7) Icons.Default.Star else Icons.Default.Check, null, tint = if (plan.days > 7) NeonPurple else NeonBlue)
                 }
                 Spacer(modifier = Modifier.width(16.dp))
                 Column(modifier = Modifier.weight(1f)) {

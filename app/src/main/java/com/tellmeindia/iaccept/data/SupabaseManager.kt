@@ -1,7 +1,16 @@
 package com.tellmeindia.iaccept.data
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
+import android.os.Build
 import android.util.Log
+import android.widget.RemoteViews
+import androidx.core.app.NotificationCompat
+import com.tellmeindia.iaccept.MainActivity
+import com.tellmeindia.iaccept.R
 import io.github.jan.supabase.SupabaseClient
 import io.github.jan.supabase.createSupabaseClient
 import io.github.jan.supabase.gotrue.Auth
@@ -23,6 +32,7 @@ import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.contentType
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
@@ -41,57 +51,228 @@ class SupabaseManager(private val context: Context) {
     private val apiBaseUrl = "https://iaccept.tellmeindia.com/api/payments"
 
     val client: SupabaseClient = createSupabaseClient(supabaseUrl, supabaseKey) {
-        httpEngine = OkHttp.create()
+        httpEngine = OkHttp.create {
+            config {
+                cache(null)
+            }
+        }
         install(Auth)
         install(Postgrest)
         install(Realtime)
     }
 
     private val httpClient = HttpClient(OkHttp) {
-        // Simple client for Next.js API calls
+        engine {
+            config {
+                cache(null)
+            }
+        }
     }
 
     private val _subscriptionActive = MutableStateFlow(false)
     val subscriptionActive: StateFlow<Boolean> = _subscriptionActive
 
+    val latestAnnouncement = MutableStateFlow<AdminNotification?>(null)
+
     private val _profileFlow = MutableStateFlow<ProfileRow?>(null)
     val profileFlow: StateFlow<ProfileRow?> get() = _profileFlow
+
+    private val seenNotifIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
     private val scope = CoroutineScope(Dispatchers.IO)
 
     init {
         scope.launch {
+            fallbackLocalSubCheck()
             monitorProfileRealtime()
         }
     }
 
+    private var subExpiryJob: Job? = null
+
+    private fun applySubExpiry(expiry: Instant) {
+        val now = Clock.System.now()
+        val isActive = expiry > now
+        _subscriptionActive.value = isActive
+
+        subExpiryJob?.cancel()
+        if (isActive) {
+            val remainingMs = (expiry - now).inWholeMilliseconds
+            if (remainingMs > 0) {
+                subExpiryJob = scope.launch {
+                    delay(remainingMs)
+                    _subscriptionActive.value = false
+                }
+            }
+        }
+    }
+
+    private fun fallbackLocalSubCheck() {
+        try {
+            val localDb = IAcceptDatabase.getDatabase(context)
+            val localProfile = localDb.dao().getProfileSync()
+            if (localProfile != null && !localProfile.subscriptionUntil.isNullOrBlank()) {
+                val rawDate = localProfile.subscriptionUntil
+                val isoString = if (!rawDate.contains("T")) rawDate.replace(" ", "T") else rawDate
+                val cleanIso = isoString.split("+")[0].split("Z")[0]
+                val finalIso = if (cleanIso.endsWith("Z")) cleanIso else "${cleanIso}Z"
+                val expiry = try {
+                    Instant.parse(finalIso)
+                } catch (e: Exception) {
+                    Instant.parse("${finalIso.take(10)}T23:59:59Z")
+                }
+                applySubExpiry(expiry)
+            }
+        } catch (e: Exception) {
+            // Silent fallback, no logging/storage bloat
+        }
+    }
+
     private suspend fun monitorProfileRealtime() {
-        // Wait for auth to be ready
-        while (client.auth.currentUserOrNull() == null) {
-            delay(3000)
+        var attempts = 0
+        while (client.auth.currentUserOrNull() == null && attempts < 3) {
+            try {
+                client.auth.retrieveUserForCurrentSession()
+            } catch (e: Exception) { }
+            if (client.auth.currentUserOrNull() == null) {
+                delay(2000)
+                attempts++
+            }
         }
         
-        val user = client.auth.currentUserOrNull() ?: return
-        Log.d("SupabaseManager", "REALTIME: Starting monitor for ${user.id}")
+        val user = client.auth.currentUserOrNull()
         
-        // 1. Initial Force Refresh
+        // Initial Refresh (will fallback to Room DB if offline/session expired)
         refreshProfile()
 
-        // 2. Realtime Listener
-        val channel = client.realtime.channel("profile_sync")
-        val changeFlow = channel.postgresChangeFlow<PostgresAction.Update>(schema = "public") {
-            table = "profiles"
+        if (user == null) return
+
+        scope.launch {
+            try {
+                val channel = client.realtime.channel("profile_sync")
+                val changeFlow = channel.postgresChangeFlow<PostgresAction.Update>(schema = "public") {
+                    table = "profiles"
+                }
+
+                changeFlow
+                    .onEach { action ->
+                        if (action.record["id"]?.toString()?.replace("\"", "") == user.id) {
+                            refreshProfile()
+                        }
+                    }.launchIn(this)
+
+                channel.subscribe()
+            } catch (e: Exception) {
+                // Silent failure for offline
+            }
         }
 
-        changeFlow
-            .onEach { action ->
-                if (action.record["id"]?.toString()?.replace("\"", "") == user.id) {
-                    refreshProfile()
-                    Log.d("SupabaseManager", "REALTIME: Profile Update Received & Refreshed")
+        scope.launch {
+            try {
+                val notifChannel = client.realtime.channel("admin_notifs")
+                val notifChangeFlow = notifChannel.postgresChangeFlow<PostgresAction.Insert>(schema = "public") {
+                    table = "admin_notifications"
                 }
-            }.launchIn(scope)
 
-        channel.subscribe()
+                notifChangeFlow
+                    .onEach { action ->
+                        try {
+                            val record = action.record
+                            val notifId = record["id"]?.toString()?.replace("\"", "") ?: ""
+                            if (notifId.isNotBlank() && seenNotifIds.contains(notifId)) return@onEach
+                            if (notifId.isNotBlank()) seenNotifIds.add(notifId)
+
+                            val targetUserId = record["user_id"]?.toString()?.replace("\"", "")
+                            val title = record["title"]?.toString()?.replace("\"", "") ?: "IAccept Announcement"
+                            val message = record["message"]?.toString()?.replace("\"", "") ?: ""
+                            val targetScreen = record["target_screen"]?.toString()?.replace("\"", "") ?: "home"
+
+                            val currentUserId = client.auth.currentUserOrNull()?.id
+
+                            if (targetUserId.isNullOrBlank() || targetUserId == "null" || targetUserId == "NULL" || targetUserId == currentUserId) {
+                                val notifObj = AdminNotification(
+                                    id = notifId,
+                                    userId = targetUserId,
+                                    title = title,
+                                    message = message,
+                                    targetScreen = targetScreen
+                                )
+                                latestAnnouncement.value = notifObj
+                                showAdminSystemNotification(title, message, targetScreen, notifId)
+                            }
+                        } catch (e: Exception) { }
+                    }.launchIn(this)
+
+                notifChannel.subscribe()
+            } catch (e: Exception) {
+                // Silent failure for offline
+            }
+        }
+    }
+
+    private fun showAdminSystemNotification(title: String, message: String, targetScreen: String, notifId: String?) {
+        try {
+            val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            val channelId = "AdminNotifChannel"
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val channel = NotificationChannel(
+                    channelId,
+                    "Admin Announcements",
+                    NotificationManager.IMPORTANCE_HIGH
+                ).apply {
+                    description = "Important updates and offers from IAccept Admin"
+                    enableVibration(true)
+                }
+                notificationManager.createNotificationChannel(channel)
+            }
+
+            val intent = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                if (targetScreen != "home") {
+                    putExtra("subScreen", targetScreen)
+                }
+            }
+
+            val uniqueNotifId = notifId?.hashCode() ?: (title + message).hashCode()
+            val pendingIntent = PendingIntent.getActivity(
+                context,
+                Math.abs(uniqueNotifId % 10000),
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val actionText = when (targetScreen.lowercase()) {
+                "subscription" -> "Opens SUBSCRIPTION Screen ➔"
+                "referral" -> "Opens REFERRAL Screen ➔"
+                else -> "Opens HOME Screen ➔"
+            }
+
+            val displayTitle = if (title.trim().startsWith("⚡")) title else "⚡ $title"
+
+            val customView = RemoteViews(context.packageName, R.layout.notification_admin_custom).apply {
+                setTextViewText(R.id.notif_app_name, "iAccept Driver")
+                setTextViewText(R.id.notif_time, "• Just now")
+                setTextViewText(R.id.notif_title, displayTitle)
+                setTextViewText(R.id.notif_body, message)
+                setTextViewText(R.id.notif_action_text, actionText)
+            }
+
+            val notification = NotificationCompat.Builder(context, channelId)
+                .setSmallIcon(R.drawable.app_logo)
+                .setStyle(NotificationCompat.DecoratedCustomViewStyle())
+                .setCustomContentView(customView)
+                .setCustomBigContentView(customView)
+                .setPriority(NotificationCompat.PRIORITY_MAX)
+                .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+                .setAutoCancel(true)
+                .setContentIntent(pendingIntent)
+                .build()
+
+            notificationManager.notify(Math.abs(uniqueNotifId), notification)
+        } catch (e: Exception) {
+            // Fail silently
+        }
     }
 
     private fun updateSubStatus(profile: ProfileRow?) {
@@ -114,15 +295,12 @@ class SupabaseManager(private val context: Context) {
                     Instant.parse("${finalIso.take(10)}T23:59:59Z")
                 }
                 
-                val now = Clock.System.now()
-                _subscriptionActive.value = expiry > now
-                Log.d("SupabaseManager", "Sub Status: ${expiry > now} | Until: $expiry")
+                applySubExpiry(expiry)
             } catch (e: Exception) {
-                Log.e("SupabaseManager", "CRITICAL Parse failed: ${profile.cloudSubUntil} | ${e.message}")
-                _subscriptionActive.value = false
+                fallbackLocalSubCheck()
             }
         } else {
-            _subscriptionActive.value = false
+            fallbackLocalSubCheck()
         }
     }
 
@@ -397,20 +575,76 @@ class SupabaseManager(private val context: Context) {
 
     suspend fun refreshProfile(): Result<ProfileRow> {
         return try {
-            val user = client.auth.currentUserOrNull() ?: return Result.failure(Exception("Not logged in"))
-            val profile = client.postgrest["profiles"].select {
-                filter { eq("id", user.id) }
-            }.decodeSingleOrNull<ProfileRow>()
+            if (client.auth.currentUserOrNull() == null) {
+                try {
+                    client.auth.retrieveUserForCurrentSession()
+                } catch (e: Exception) { }
+            }
+
+            val user = client.auth.currentUserOrNull()
+            val profile = if (user != null) {
+                client.postgrest["profiles"].select {
+                    filter { eq("id", user.id) }
+                }.decodeSingleOrNull<ProfileRow>()
+            } else null
             
             if (profile != null) {
                 _profileFlow.value = profile
                 updateSubStatus(profile)
+                fetchLatestNotification()
                 Result.success(profile)
             } else {
-                Result.failure(Exception("Profile not found"))
+                fallbackLocalSubCheck()
+                Result.failure(Exception("Offline or session expired"))
             }
         } catch (e: Exception) {
+            fallbackLocalSubCheck()
             Result.failure(e)
+        }
+    }
+
+    suspend fun fetchLatestNotification() {
+        try {
+            val list = client.postgrest["admin_notifications"].select {
+                order("created_at", order = io.github.jan.supabase.postgrest.query.Order.DESCENDING)
+                limit(1)
+            }.decodeList<AdminNotification>()
+
+            if (list.isNotEmpty()) {
+                val notif = list[0]
+                val currentUserId = client.auth.currentUserOrNull()?.id
+                val notifId = notif.id ?: "${notif.title}_${notif.message}"
+
+                if (!seenNotifIds.contains(notifId)) {
+                    val targetUserId = notif.userId
+                    if (targetUserId.isNullOrBlank() || targetUserId == "null" || targetUserId == "NULL" || targetUserId == currentUserId) {
+                        seenNotifIds.add(notifId)
+                        latestAnnouncement.value = notif
+                        showAdminSystemNotification(notif.title, notif.message, notif.targetScreen ?: "home", notifId)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // Fail silently
+        }
+    }
+
+    suspend fun checkForUpdate(): AppUpdate? {
+        return try {
+            val list = client.postgrest["app_updates"].select {
+                order("version_code", order = io.github.jan.supabase.postgrest.query.Order.DESCENDING)
+                limit(1)
+            }.decodeList<AppUpdate>()
+
+            if (list.isNotEmpty()) {
+                val latest = list[0]
+                val currentVersionCode = com.tellmeindia.iaccept.BuildConfig.VERSION_CODE
+                if (latest.versionCode > currentVersionCode) {
+                    latest
+                } else null
+            } else null
+        } catch (e: Exception) {
+            null
         }
     }
 }

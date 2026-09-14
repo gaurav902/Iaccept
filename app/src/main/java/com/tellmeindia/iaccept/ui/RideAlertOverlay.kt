@@ -93,7 +93,7 @@ fun RideAlertOverlay(
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
-                    imageVector = if (isMatch) Icons.Default.DoneAll else Icons.Default.Close,
+                    imageVector = if (isMatch) Icons.Default.Check else Icons.Default.Close,
                     contentDescription = null,
                     tint = if (isMatch) Color(0xFF69F0AE) else Color(0xFFFF5252),
                     modifier = Modifier.size(32.dp)
@@ -122,7 +122,7 @@ fun RideAlertOverlay(
             Spacer(modifier = Modifier.height(16.dp))
 
             Column(horizontalAlignment = Alignment.Start, modifier = Modifier.fillMaxWidth()) {
-                DetailRow(Icons.Default.MyLocation, "· ${rideInfo.pickupDistance} km\n${rideInfo.pickupAddress}")
+                DetailRow(Icons.Default.Place, "· ${rideInfo.pickupDistance} km\n${rideInfo.pickupAddress}")
                 Spacer(modifier = Modifier.height(12.dp))
                 DetailRow(Icons.Default.Place, "${rideInfo.dropDistance} km\n${rideInfo.dropAddress}")
             }

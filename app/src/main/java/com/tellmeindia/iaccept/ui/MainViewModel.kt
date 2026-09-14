@@ -122,9 +122,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _uiState.update { it.copy(isSyncing = true) }
             supabaseManager.refreshProfile()
-            delay(500) // Small delay for visual feedback
+            
+            // Smart Retry: If sub is not active, retry up to 3 times with 2s delay
+            // to account for Webhook server processing delay when returning from payment browser
+            var retries = 0
+            while (!supabaseManager.subscriptionActive.value && retries < 3) {
+                delay(2000)
+                supabaseManager.refreshProfile()
+                retries++
+            }
+            
             _uiState.update { it.copy(isSyncing = false) }
         }
+    }
+
+    val latestAnnouncement = supabaseManager.latestAnnouncement
+    val availableUpdate = MutableStateFlow<AppUpdate?>(null)
+
+    fun dismissAnnouncement() {
+        supabaseManager.latestAnnouncement.value = null
+    }
+
+    fun checkAppUpdate() {
+        viewModelScope.launch {
+            val update = supabaseManager.checkForUpdate()
+            if (update != null) {
+                availableUpdate.value = update
+            }
+        }
+    }
+
+    fun dismissUpdate() {
+        availableUpdate.value = null
     }
 
     fun getSupabaseManager() = supabaseManager

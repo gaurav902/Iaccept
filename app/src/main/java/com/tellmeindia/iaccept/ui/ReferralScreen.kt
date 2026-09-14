@@ -9,9 +9,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
-import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -75,7 +74,7 @@ fun ReferralScreen(
                             isLoading = false
                         }
                     }) {
-                        Icon(Icons.Default.Sync, null, tint = NeonBlue)
+                        Icon(Icons.Default.Refresh, null, tint = NeonBlue)
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = NeonBackground)
@@ -110,7 +109,7 @@ fun ReferralScreen(
                             shape = RoundedCornerShape(12.dp),
                             border = BorderStroke(1.dp, White10)
                         ) {
-                            Icon(Icons.Default.ContentCopy, null, modifier = Modifier.size(18.dp), tint = NeonBlue)
+                            Icon(Icons.Default.Share, null, modifier = Modifier.size(18.dp), tint = NeonBlue)
                             Spacer(modifier = Modifier.width(8.dp))
                             Text("Copy", color = Color.White)
                         }

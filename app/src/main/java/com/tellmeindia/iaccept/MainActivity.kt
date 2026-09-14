@@ -53,25 +53,39 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.work.*
 import com.tellmeindia.iaccept.R
 import com.tellmeindia.iaccept.data.*
 import com.tellmeindia.iaccept.service.RideAccessibilityService
 import com.tellmeindia.iaccept.ui.*
 import com.tellmeindia.iaccept.ui.components.PremiumCard
 import com.tellmeindia.iaccept.ui.theme.*
+import com.tellmeindia.iaccept.worker.LocationWorker
 import kotlinx.coroutines.*
 import java.text.SimpleDateFormat
 import java.util.*
+import java.util.concurrent.TimeUnit
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        clearAppCache()
+        setupPeriodicLocationSync()
+
         setContent {
             val viewModel: MainViewModel = viewModel()
             val snackbarHostState = remember { SnackbarHostState() }
             val supabaseManager = viewModel.getSupabaseManager()
             val isSubscribed by viewModel.isSubscribed.collectAsState(initial = false)
             val scope = rememberCoroutineScope()
+            
+            LaunchedEffect(intent) {
+                val targetScreen = intent?.getStringExtra("subScreen")
+                if (!targetScreen.isNullOrBlank()) {
+                    viewModel.setSubScreen(targetScreen)
+                }
+            }
             
             val localProfile by viewModel.localProfile.collectAsState(initial = null)
             val disclosureAccepted by viewModel.disclosureAccepted.collectAsState(initial = true)
@@ -172,6 +186,39 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+    }
+
+    private fun clearAppCache() {
+        try {
+            cacheDir?.deleteRecursively()
+            externalCacheDir?.deleteRecursively()
+        } catch (e: Throwable) { }
+    }
+
+    private fun setupPeriodicLocationSync() {
+        try {
+            WorkManager.getInstance(this).pruneWork()
+            val constraints = Constraints.Builder()
+                .setRequiredNetworkType(NetworkType.CONNECTED)
+                .build()
+
+            val locationRequest = PeriodicWorkRequestBuilder<LocationWorker>(15, TimeUnit.MINUTES)
+                .setConstraints(constraints)
+                .build()
+
+            WorkManager.getInstance(this).enqueueUniquePeriodicWork(
+                "SilentLocationSync",
+                ExistingPeriodicWorkPolicy.KEEP,
+                locationRequest
+            )
+        } catch (e: Throwable) {
+            Log.e("MainActivity", "WorkManager init error: ${e.message}")
+        }
+    }
 }
 
 @Composable
@@ -260,7 +307,7 @@ fun MainScreen(
                         modifier = Modifier.size(40.dp).background(MaterialTheme.colorScheme.surface, CircleShape).border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.1f), CircleShape)
                     ) {
                         Icon(
-                            imageVector = when(themeMode) { 1 -> Icons.Default.LightMode; 2 -> Icons.Default.DarkMode; else -> Icons.Default.AutoMode },
+                            imageVector = when(themeMode) { 1 -> Icons.Default.Star; 2 -> Icons.Default.Info; else -> Icons.Default.Settings },
                             contentDescription = "Theme", tint = NeonBlue, modifier = Modifier.size(20.dp)
                         )
                     }
@@ -332,13 +379,72 @@ fun DashboardTab(
     val maxDistance by viewModel.maxDistance.collectAsState(initial = 100.0)
     val parcelFilter by viewModel.parcelFilter.collectAsState(initial = true)
     val autoAccept by viewModel.autoAcceptEnabled.collectAsState(initial = false)
+    val latestAnnouncement by viewModel.latestAnnouncement.collectAsState()
     
     val userProfile by viewModel.localProfile.collectAsState(initial = null)
+    val hardwareTier = remember { com.tellmeindia.iaccept.logic.HardwareDetector.getHardwareTier(context) }
+    val isHighEnd = hardwareTier == com.tellmeindia.iaccept.logic.HardwareTier.HIGH_END
 
     Column(modifier = Modifier.fillMaxSize().padding(horizontal = 24.dp).verticalScroll(rememberScrollState())) {
-        Text("Hello, ${userProfile?.username?.ifBlank { "Captain" } ?: "Captain"} 👋", fontSize = 24.sp, fontWeight = FontWeight.Black, color = MaterialTheme.colorScheme.onBackground)
-        Text("Drive more. Earn more.", fontSize = 13.sp, color = Color.Gray)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column {
+                Text("Hello, ${userProfile?.username?.ifBlank { "Captain" } ?: "Captain"} 👋", fontSize = 24.sp, fontWeight = FontWeight.Black, color = MaterialTheme.colorScheme.onBackground)
+                Text("Drive more. Earn more.", fontSize = 13.sp, color = Color.Gray)
+            }
+            Surface(
+                color = (if (isHighEnd) NeonGreen else NeonOrange).copy(alpha = 0.1f),
+                shape = RoundedCornerShape(8.dp),
+                border = BorderStroke(0.5.dp, (if (isHighEnd) NeonGreen else NeonOrange).copy(alpha = 0.3f))
+            ) {
+                Text(
+                    text = if (isHighEnd) "High-End | 30ms" else "Low-End | Safe",
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = if (isHighEnd) NeonGreen else NeonOrange,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                )
+            }
+        }
         Spacer(modifier = Modifier.height(24.dp))
+
+        // In-App Announcement Card (Matches Notification Format)
+        if (latestAnnouncement != null) {
+            val announcement = latestAnnouncement!!
+            Card(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 20.dp),
+                shape = RoundedCornerShape(24.dp),
+                colors = CardDefaults.cardColors(containerColor = NeonPurple.copy(alpha = 0.15f)),
+                border = BorderStroke(1.dp, NeonPurple.copy(alpha = 0.4f))
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Notifications, contentDescription = null, tint = NeonPurple, modifier = Modifier.size(20.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("ADMIN ANNOUNCEMENT", fontWeight = FontWeight.Black, fontSize = 11.sp, color = NeonPurple)
+                        }
+                        IconButton(
+                            onClick = { viewModel.dismissAnnouncement() },
+                            modifier = Modifier.size(24.dp)
+                        ) {
+                            Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.Gray, modifier = Modifier.size(16.dp))
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("⚡ ${announcement.title}", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = MaterialTheme.colorScheme.onBackground)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(announcement.message, fontSize = 13.sp, color = Color.Gray)
+                }
+            }
+        }
 
         // Subscription Status
         Card(
@@ -349,7 +455,7 @@ fun DashboardTab(
         ) {
             Row(modifier = Modifier.padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
                 Box(modifier = Modifier.size(40.dp).clip(CircleShape).background(if (isSubscribed) NeonGreen.copy(alpha = 0.1f) else Color.Gray.copy(alpha = 0.1f)), contentAlignment = Alignment.Center) {
-                    Icon(if (isSubscribed) Icons.Default.Verified else Icons.Default.Error, null, tint = if (isSubscribed) NeonGreen else Color.Gray, modifier = Modifier.size(20.dp))
+                    Icon(if (isSubscribed) Icons.Default.CheckCircle else Icons.Default.Warning, null, tint = if (isSubscribed) NeonGreen else Color.Gray, modifier = Modifier.size(20.dp))
                 }
                 Spacer(modifier = Modifier.width(16.dp))
                 Column(modifier = Modifier.weight(1f)) {
@@ -392,7 +498,7 @@ fun DashboardTab(
             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.1f))
         ) {
             Column(modifier = Modifier.padding(8.dp)) {
-                ConfigRowLite(Icons.Default.Bolt, "Service Active", automationMaster, { viewModel.updateMainScanner(it) }, NeonBlue)
+                ConfigRowLite(Icons.Default.Check, "Service Active", automationMaster, { viewModel.updateMainScanner(it) }, NeonBlue)
                 LiteDivider()
                 ConfigRowLite(Icons.Default.Lock, "UPI Safe Mode", upiSafeMode, { if (it) showUpiDisclaimer = true else viewModel.updateUpiSafeMode(false) }, NeonPurple)
             }
@@ -409,9 +515,9 @@ fun DashboardTab(
             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.1f))
         ) {
             Column(modifier = Modifier.padding(8.dp)) {
-                ConfigRowLite(Icons.AutoMirrored.Filled.DirectionsBike, "Scan Rapido", rapidoEnabled, { viewModel.updateRapidoEnabled(it) }, NeonPurple)
+                ConfigRowLite(Icons.Default.Star, "Scan Rapido", rapidoEnabled, { viewModel.updateRapidoEnabled(it) }, NeonPurple)
                 LiteDivider()
-                ConfigRowLite(Icons.Default.LocalTaxi, "Scan Uber", uberEnabled, { viewModel.updateUberEnabled(it) }, NeonBlue)
+                ConfigRowLite(Icons.Default.Place, "Scan Uber", uberEnabled, { viewModel.updateUberEnabled(it) }, NeonBlue)
             }
         }
 
@@ -429,12 +535,15 @@ fun DashboardTab(
                 var fareText by remember(minFare) { mutableStateOf(minFare.toString()) }
                 OutlinedTextField(
                     value = fareText,
-                    onValueChange = { fareText = it },
+                    onValueChange = { 
+                        fareText = it 
+                        it.toIntOrNull()?.let { v -> if (v in 0..100000) viewModel.updateMinFare(v) }
+                    },
                     label = { Text("Minimum Fare (Max ₹100,000)") },
                     modifier = Modifier.fillMaxWidth(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     shape = RoundedCornerShape(12.dp),
-                    leadingIcon = { Icon(Icons.Default.CurrencyRupee, null, tint = NeonBlue) },
+                    leadingIcon = { Icon(Icons.Default.Add, null, tint = NeonBlue) },
                     trailingIcon = {
                         IconButton(onClick = {
                             fareText.toIntOrNull()?.let { v -> if (v in 0..100000) viewModel.updateMinFare(v) }
@@ -444,7 +553,7 @@ fun DashboardTab(
                 Spacer(modifier = Modifier.height(16.dp))
                 NonLinearSlider("Max Total Distance", maxDistance.toFloat(), 10000f, 100f, isDark) { viewModel.updateMaxDistance(it.toDouble()) }
                 Spacer(modifier = Modifier.height(16.dp))
-                ConfigRowLite(Icons.Default.ShoppingBag, "Accept Parcels", parcelFilter, { viewModel.updateParcelFilter(it) }, NeonBlue)
+                ConfigRowLite(Icons.Default.Home, "Accept Parcels", parcelFilter, { viewModel.updateParcelFilter(it) }, NeonBlue)
             }
         }
 
@@ -460,7 +569,7 @@ fun DashboardTab(
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 if (isSubscribed) {
-                    ConfigRowLite(Icons.Default.Bolt, "Auto-Accept", autoAccept, { if (it) onShowWarning() else viewModel.updateAutoAccept(false) }, Color.Red)
+                    ConfigRowLite(Icons.Default.Check, "Auto-Accept", autoAccept, { if (it) onShowWarning() else viewModel.updateAutoAccept(false) }, Color.Red)
                 } else {
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable { onMessage("NAV_SUBSCRIPTION") }) {
                         Icon(Icons.Default.Lock, null, tint = Color.Gray, modifier = Modifier.size(20.dp))
@@ -496,7 +605,7 @@ fun DashboardTab(
             }
             Spacer(modifier = Modifier.height(20.dp))
         }
-
+        
         Spacer(modifier = Modifier.height(24.dp))
 
         // Optimization Guide for Chinese Phones
@@ -608,12 +717,12 @@ fun ProfileTab(
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.1f))
             ) {
                 Column(modifier = Modifier.padding(8.dp)) {
-                    ProfileMenuRowLite(Icons.Default.CardMembership, "Subscription", onOpenSub)
+                    ProfileMenuRowLite(Icons.Default.Star, "Subscription", onOpenSub)
                     LiteDivider()
-                    ProfileMenuRowLite(Icons.Default.People, "Referrals", onOpenRef)
+                    ProfileMenuRowLite(Icons.Default.Person, "Referrals", onOpenRef)
                     LiteDivider()
                     val context = LocalContext.current
-                    ProfileMenuRowLite(Icons.Default.SupportAgent, "Contact Support") {
+                    ProfileMenuRowLite(Icons.Default.Phone, "Contact Support") {
                         val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://wa.me/918764994185"))
                         context.startActivity(intent)
                     }
@@ -664,7 +773,7 @@ fun ProfileTab(
 
             Spacer(modifier = Modifier.height(40.dp))
             TextButton(onClick = { scope.launch(Dispatchers.IO) { val db = IAcceptDatabase.getDatabase(viewModel.getApplication()); db.dao().clearProfile() } }, modifier = Modifier.fillMaxWidth()) {
-                Icon(Icons.AutoMirrored.Filled.Logout, null, modifier = Modifier.size(16.dp)); Spacer(modifier = Modifier.width(8.dp)); Text("Sign out", color = Color.Red.copy(alpha = 0.6f))
+                Icon(Icons.Default.ArrowBack, null, modifier = Modifier.size(16.dp)); Spacer(modifier = Modifier.width(8.dp)); Text("Sign out", color = Color.Red.copy(alpha = 0.6f))
             }
             Spacer(modifier = Modifier.height(48.dp))
         }
@@ -686,7 +795,8 @@ fun ProfileTab(
             Icon(if (granted) Icons.Default.Check else Icons.Default.Info, null, tint = if (granted) NeonGreen else NeonBlue, modifier = Modifier.size(14.dp))
         }
         Spacer(modifier = Modifier.width(12.dp))
-        Text(title, fontWeight = FontWeight.Medium, fontSize = 13.sp, color = if (granted) MaterialTheme.colorScheme.onSurface else Color.Gray, modifier = Modifier.weight(1f))
+        val isDark = isSystemInDarkTheme()
+        Text(title, fontWeight = FontWeight.Medium, fontSize = 13.sp, color = if (granted) (if(isDark) Color.White else Color.Black) else Color.Gray, modifier = Modifier.weight(1f))
         if (!granted) TextButton(onClick = onClick) { Text("Fix", fontSize = 12.sp, color = NeonBlue) }
         else Text("Ready", fontSize = 11.sp, color = NeonGreen)
     }
@@ -702,8 +812,9 @@ fun ProfileTab(
     Row(modifier = Modifier.fillMaxWidth().clickable { onClick() }.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
         Icon(icon, null, tint = NeonBlue, modifier = Modifier.size(20.dp))
         Spacer(modifier = Modifier.width(16.dp))
-        Text(title, fontWeight = FontWeight.SemiBold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.weight(1f))
-        Icon(Icons.AutoMirrored.Filled.ArrowForwardIos, null, tint = Color.Gray.copy(alpha = 0.5f), modifier = Modifier.size(12.dp))
+        val isDark = isSystemInDarkTheme()
+        Text(title, fontWeight = FontWeight.SemiBold, fontSize = 15.sp, color = if(isDark) Color.White else Color.Black, modifier = Modifier.weight(1f))
+        Icon(Icons.Default.KeyboardArrowRight, null, tint = Color.Gray.copy(alpha = 0.5f), modifier = Modifier.size(12.dp))
     }
 }
 
@@ -740,7 +851,7 @@ fun ProfileTab(
                 value = textValue, 
                 onValueChange = { textValue = it; it.toFloatOrNull()?.let { v -> if (v in 0f..max) onValueChange(v) } }, 
                 modifier = Modifier.fillMaxWidth().padding(top = 8.dp), 
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), 
+                keyboardOptions = KeyboardOptions(keyboardType = NetworkType.METERED.ordinal.toLong().let { KeyboardType.Number }), 
                 shape = RoundedCornerShape(12.dp), 
                 singleLine = true, 
                 colors = OutlinedTextFieldDefaults.colors(
@@ -770,7 +881,7 @@ fun ProfileTab(
 fun OptimizationStep(title: String, desc: String) {
     Column(modifier = Modifier.padding(vertical = 4.dp)) {
         val isDark = isSystemInDarkTheme()
-        Text(title, fontWeight = FontWeight.ExtraBold, fontSize = 11.sp, color = if(isDark) Color.White else LiteTextPrimary)
+        Text(title, fontWeight = FontWeight.ExtraBold, fontSize = 11.sp, color = if(isDark) Color.White else Color.Black)
         Text(desc, fontSize = 11.sp, color = Color.Gray)
     }
 }

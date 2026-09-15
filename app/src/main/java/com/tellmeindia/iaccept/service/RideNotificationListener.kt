@@ -16,12 +16,12 @@ import com.tellmeindia.iaccept.logic.RideInfo
 import com.tellmeindia.iaccept.logic.CoreBridge
 import com.tellmeindia.iaccept.logic.NativeRideEngine
 import android.os.Process
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import java.util.*
 
 class RideNotificationListener : NotificationListenerService() {
 
@@ -51,33 +51,23 @@ class RideNotificationListener : NotificationListenerService() {
         instance = this
         createNotificationChannel()
 
-        // 1. Force Android OS into ACTIVE Standby Bucket (0ms Delay)
-        try {
-            val notification = NotificationCompat.Builder(this, DETECT_CHANNEL_ID)
-                .setContentTitle("IAccept Kernel Engine")
-                .setContentText("Listening for high-speed notifications...")
-                .setSmallIcon(R.drawable.app_logo)
-                .setPriority(NotificationCompat.PRIORITY_MIN)
-                .setCategory(Notification.CATEGORY_SERVICE)
-                .build()
-            startForeground(101, notification)
-        } catch (e: Exception) { }
-
-        // 2. High-Priority CPU WakeLock (Prevents Doze Mode Notification Delay)
+        // 1. Infinite High-Priority CPU WakeLock (Prevents MIUI/ColorOS Sleep)
         try {
             val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
             wakeLock = pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "IAccept::ZeroDelayNotifWakeLock").apply {
-                acquire(10 * 60 * 1000L) // Holds CPU awake at top priority
+                acquire() // Infinite hold until service is destroyed
             }
-        } catch (e: Exception) { }
+        } catch (e: Throwable) { }
         
-        // 3. Hardware Speed: Bind thread to Prime CPU Cores + Lock RAM pages
+        // 2. Hardware Speed: Bind thread to Prime CPU Cores + Lock RAM pages
         try {
             nativeEngine.optimizeHardwareSpeed(this)
-        } catch (e: Exception) { }
+        } catch (e: Throwable) { }
 
-        // 4. Cellular Speed: Start 5G Modem Radio Pre-warmer
-        com.tellmeindia.iaccept.logic.RadioPrewarmer.startPrewarming(serviceScope)
+        // 3. Cellular Speed: Start 5G Modem Radio Pre-warmer
+        try {
+            com.tellmeindia.iaccept.logic.RadioPrewarmer.startPrewarming(serviceScope)
+        } catch (e: Throwable) { }
     }
 
     private fun createNotificationChannel() {
@@ -89,9 +79,6 @@ class RideNotificationListener : NotificationListenerService() {
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
-        // CORE PRIORITY: Set thread to urgent display for Blink-Speed response
-        Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY)
-        
         val packageName = sbn.packageName
         if (packageName == this.packageName) return
         
@@ -102,8 +89,8 @@ class RideNotificationListener : NotificationListenerService() {
 
         serviceScope.launch(Dispatchers.Default) {
             // 2. ELITE PLATFORM TOGGLES
-            val rapidoEnabled = preferenceManager.rapidoEnabled.first()
-            val uberEnabled = preferenceManager.uberEnabled.first()
+            val rapidoEnabled = try { preferenceManager.rapidoEnabled.first() } catch (e: Exception) { true }
+            val uberEnabled = try { preferenceManager.uberEnabled.first() } catch (e: Exception) { true }
             if (isRapido && !rapidoEnabled) return@launch
             if (isUber && !uberEnabled) return@launch
 
@@ -115,9 +102,9 @@ class RideNotificationListener : NotificationListenerService() {
             val rideInfo = nativeEngine.parseRide(title, "$title $text $bigText")
             if (rideInfo != null) {
                 // PRE-DECISION: Prime the core bridge
-                val minFare = preferenceManager.minFare.first()
-                val maxDistance = preferenceManager.maxDistance.first()
-                val allowParcels = preferenceManager.parcelFilter.first()
+                val minFare = try { preferenceManager.minFare.first() } catch (e: Exception) { 0 }
+                val maxDistance = try { preferenceManager.maxDistance.first() } catch (e: Exception) { 100.0 }
+                val allowParcels = try { preferenceManager.parcelFilter.first() } catch (e: Exception) { true }
                 
                 val isMatch = checkMatch(rideInfo, minFare, maxDistance, allowParcels)
                 CoreBridge.prime(rideInfo.fingerprint, isMatch)
@@ -143,13 +130,13 @@ class RideNotificationListener : NotificationListenerService() {
 
     private fun handleRideRequest(rideInfo: RideInfo, sbn: StatusBarNotification) {
         serviceScope.launch {
-            val masterEnabled = preferenceManager.automationMaster.first()
+            val masterEnabled = try { preferenceManager.automationMaster.first() } catch (e: Exception) { true }
             if (!masterEnabled) return@launch
 
-            val minFare = preferenceManager.minFare.first()
-            val maxDistance = preferenceManager.maxDistance.first()
-            val autoAccept = preferenceManager.autoAcceptEnabled.first()
-            val allowParcels = preferenceManager.parcelFilter.first()
+            val minFare = try { preferenceManager.minFare.first() } catch (e: Exception) { 0 }
+            val maxDistance = try { preferenceManager.maxDistance.first() } catch (e: Exception) { 100.0 }
+            val autoAccept = try { preferenceManager.autoAcceptEnabled.first() } catch (e: Exception) { false }
+            val allowParcels = try { preferenceManager.parcelFilter.first() } catch (e: Exception) { true }
 
             val isMatch = checkMatch(rideInfo, minFare, maxDistance, allowParcels)
             val reason = getIgnoreReason(rideInfo, minFare, maxDistance, allowParcels)
@@ -168,7 +155,9 @@ class RideNotificationListener : NotificationListenerService() {
                     putExtra(RideOverlayService.EXTRA_NOTIFICATION_KEY, sbn.key)
                     putExtra(RideOverlayService.EXTRA_IS_MATCH, true)
                 }
-                startService(overlayIntent)
+                try {
+                    startService(overlayIntent)
+                } catch (e: Throwable) { }
 
                 if (autoAccept) {
                     val accepted = triggerAcceptAction(sbn, rideInfo.fingerprint)
@@ -188,7 +177,7 @@ class RideNotificationListener : NotificationListenerService() {
     private fun showDetailedDetectNotification(info: RideInfo, isMatch: Boolean, reason: String) {
         val statusText = if (isMatch) "MATCHED ✅" else "IGNORED 🛡️"
         val channelId = if (isMatch) RideAccessibilityService.SUCCESS_CHANNEL_ID else RideAccessibilityService.IGNORE_CHANNEL_ID
-        val notifId = if (isMatch) RideAccessibilityService.SUCCESS_NOTIF_ID else RideAccessibilityService.IGNORE_NOTIF_ID
+        val notifId = RideAccessibilityService.RIDE_REPORT_ID
 
         val notification = NotificationCompat.Builder(this, channelId)
             .setSmallIcon(R.drawable.app_logo)
@@ -202,13 +191,13 @@ class RideNotificationListener : NotificationListenerService() {
                 "💬 REASON: $reason"
             ))
             .setPriority(NotificationCompat.PRIORITY_MAX)
-            .setTimeoutAfter(if (isMatch) 15000L else 8000L)
             .setAutoCancel(true)
             .build()
 
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        try { manager.cancelAll() } catch (e: Exception) { }
-        manager.notify(notifId, notification)
+        try {
+            manager.notify(notifId, notification)
+        } catch (e: Throwable) { }
     }
 
     private fun triggerAcceptAction(sbn: StatusBarNotification, fingerprint: String? = null): Boolean {
@@ -261,8 +250,17 @@ class RideNotificationListener : NotificationListenerService() {
         instance = this
     }
 
+    override fun onListenerDisconnected() {
+        super.onListenerDisconnected()
+        // Anti-ColorOS / Anti-MIUI Protection: If OS tries to kill listener silently, wake it up.
+        try {
+            requestRebind(android.content.ComponentName(this, RideNotificationListener::class.java))
+        } catch (e: Exception) { }
+    }
+
     override fun onDestroy() {
         try {
+            serviceScope.cancel()
             if (wakeLock?.isHeld == true) wakeLock?.release()
         } catch (e: Exception) { }
         instance = null

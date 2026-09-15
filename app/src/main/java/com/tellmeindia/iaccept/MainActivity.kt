@@ -617,11 +617,41 @@ fun DashboardTab(
             border = BorderStroke(1.dp, NeonPurple.copy(alpha = 0.1f))
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                Text("For Vivo, Oppo, Realme & Xiaomi users:", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = NeonPurple)
+                val brand = android.os.Build.MANUFACTURER.uppercase()
+                Text("For $brand users:", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = NeonPurple)
                 Spacer(modifier = Modifier.height(8.dp))
-                OptimizationStep("1. Lock App", "Open Recent Apps and swipe DOWN on IAccept to Lock it. (Crucial)")
-                OptimizationStep("2. Auto-Start", "Allow IAccept to 'Auto-start' in your Phone Settings.")
-                OptimizationStep("3. No Battery Limit", "Ensure 'Battery Unrestricted' is ready in the Setup section above.")
+                OptimizationStep("1. Lock App in Recent Apps", "Open your Recent Apps menu and swipe DOWN on IAccept to Lock it with a padlock icon. This stops the OS from killing the scanner.")
+                OptimizationStep(
+                    "2. Enable Auto-Start", 
+                    "Allow IAccept to 'Auto-start' or run in the background in your Phone Settings.",
+                    actionText = "OPEN AUTO-START SETTINGS ➔"
+                ) {
+                    try {
+                        val intent = Intent()
+                        val lowerBrand = brand.lowercase()
+                        when {
+                            lowerBrand.contains("xiaomi") || lowerBrand.contains("poco") || lowerBrand.contains("redmi") -> {
+                                intent.component = android.content.ComponentName("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity")
+                            }
+                            lowerBrand.contains("oppo") || lowerBrand.contains("realme") -> {
+                                intent.component = android.content.ComponentName("com.coloros.safecenter", "com.coloros.safecenter.startupapp.StartupAppListActivity")
+                            }
+                            lowerBrand.contains("vivo") || lowerBrand.contains("iqoo") -> {
+                                intent.component = android.content.ComponentName("com.iqoo.secure", "com.iqoo.secure.ui.phoneoptimize.AddWhiteListActivity")
+                            }
+                            else -> {
+                                intent.action = Settings.ACTION_APPLICATION_DETAILS_SETTINGS
+                                intent.data = Uri.fromParts("package", context.packageName, null)
+                            }
+                        }
+                        context.startActivity(intent)
+                    } catch (e: Exception) {
+                        try {
+                            activity.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply { data = Uri.fromParts("package", context.packageName, null) })
+                        } catch (ex: Exception) { }
+                    }
+                }
+                OptimizationStep("3. Battery Unrestricted", "Ensure 'Battery Unrestricted' is showing Ready in the Setup section above.")
             }
         }
 
@@ -877,11 +907,14 @@ fun ProfileTab(
     }
 }
 
-@Composable
-fun OptimizationStep(title: String, desc: String) {
-    Column(modifier = Modifier.padding(vertical = 4.dp)) {
+@Composable fun OptimizationStep(title: String, desc: String, actionText: String? = null, onClick: (() -> Unit)? = null) {
+    Column(modifier = Modifier.padding(vertical = 6.dp)) {
         val isDark = isSystemInDarkTheme()
-        Text(title, fontWeight = FontWeight.ExtraBold, fontSize = 11.sp, color = if(isDark) Color.White else Color.Black)
+        Text(title, fontWeight = FontWeight.ExtraBold, fontSize = 12.sp, color = if(isDark) Color.White else Color.Black)
         Text(desc, fontSize = 11.sp, color = Color.Gray)
+        if (actionText != null && onClick != null) {
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(actionText, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = NeonBlue, modifier = Modifier.clickable { onClick() }.padding(vertical = 4.dp))
+        }
     }
 }

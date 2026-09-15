@@ -8,7 +8,6 @@ import android.content.Context
 import android.content.Intent
 import android.media.MediaPlayer
 import android.os.Build
-import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.content.pm.ServiceInfo
@@ -21,12 +20,8 @@ import com.tellmeindia.iaccept.logic.RideFilterEngine
 import com.tellmeindia.iaccept.logic.RideInfo
 import com.tellmeindia.iaccept.logic.MatchResult as RideMatchResult
 import kotlinx.coroutines.*
-import java.util.Date
-import java.util.Locale
-import java.util.Stack
 import java.util.LinkedList
 import java.util.Deque
-import java.text.SimpleDateFormat
 
 class RideAccessibilityService : AccessibilityService() {
 
@@ -35,8 +30,7 @@ class RideAccessibilityService : AccessibilityService() {
         const val SUCCESS_CHANNEL_ID = "RideSuccessChannel"
         const val IGNORE_CHANNEL_ID = "RideIgnoreChannel"
         const val NOTIF_ID = 2
-        const val SUCCESS_NOTIF_ID = 3
-        const val IGNORE_NOTIF_ID = 4
+        const val RIDE_REPORT_ID = 500
         
         var isServiceRunning = false
             private set
@@ -61,6 +55,8 @@ class RideAccessibilityService : AccessibilityService() {
     private val filterEngine = RideFilterEngine()
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var lastScanTime = 0L
+    private var lastPruneTime = 0L
+    private var activeMediaPlayer: MediaPlayer? = null
 
     private var cachedMinFare = 0
     private var cachedMaxDistance = 100.0
@@ -71,21 +67,31 @@ class RideAccessibilityService : AccessibilityService() {
     private var cachedScreenInteraction = true
     private var cachedRapidoEnabled = true
     private var cachedUberEnabled = true
+    
+    private var isHighEndDevice = false
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         isServiceRunning = true
+        
+        // 1. Detect Hardware Tier ONCE (Prevents UI Hangs on Low-End Phones)
+        try {
+            isHighEndDevice = com.tellmeindia.iaccept.logic.HardwareDetector.getHardwareTier(this) == com.tellmeindia.iaccept.logic.HardwareTier.HIGH_END
+        } catch (e: Throwable) {
+            isHighEndDevice = false
+        }
+
         try {
             createNotificationChannels()
             refreshForegroundNotification()
         } catch (e: Throwable) { }
 
-        // 1. Hardware Speed: Bind scanning thread to Prime CPU Cores + Lock RAM
+        // 2. Hardware Speed: Bind scanning thread to Prime CPU Cores + Lock RAM
         try {
             com.tellmeindia.iaccept.logic.NativeRideEngine().optimizeHardwareSpeed(this)
         } catch (e: Throwable) { }
 
-        // 2. Cellular Speed: Start 5G Modem Radio Pre-warmer
+        // 3. Cellular Speed: Start 5G Modem Radio Pre-warmer
         try {
             com.tellmeindia.iaccept.logic.RadioPrewarmer.startPrewarming(serviceScope)
         } catch (e: Throwable) { }
@@ -118,14 +124,16 @@ class RideAccessibilityService : AccessibilityService() {
         }
     }
 
-
     private fun createNotificationChannels() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             
-            val watchdogChannel = NotificationChannel(CHANNEL_ID, "Accessibility Service", NotificationManager.IMPORTANCE_LOW)
-            val successChannel = NotificationChannel(SUCCESS_CHANNEL_ID, "Ride Success Alerts", NotificationManager.IMPORTANCE_HIGH)
-            val ignoreChannel = NotificationChannel(IGNORE_CHANNEL_ID, "Ride Ignore Logs", NotificationManager.IMPORTANCE_HIGH)
+            val watchdogChannel = NotificationChannel(CHANNEL_ID, "Service Status", NotificationManager.IMPORTANCE_LOW)
+            val successChannel = NotificationChannel(SUCCESS_CHANNEL_ID, "Ride Success", NotificationManager.IMPORTANCE_HIGH).apply {
+                enableVibration(true)
+                setSound(null, null) 
+            }
+            val ignoreChannel = NotificationChannel(IGNORE_CHANNEL_ID, "Ride Ignored", NotificationManager.IMPORTANCE_LOW)
             
             manager.createNotificationChannel(watchdogChannel)
             manager.createNotificationChannel(successChannel)
@@ -159,7 +167,7 @@ class RideAccessibilityService : AccessibilityService() {
                 preferenceManager.upiSafeMode.collect { 
                     cachedUpiSafeMode = it
                     refreshForegroundNotification()
-                    if (it) disableSelf()
+                    if (it) try { disableSelf() } catch (e: Throwable) { }
                 } 
             }
             launch {
@@ -183,8 +191,8 @@ class RideAccessibilityService : AccessibilityService() {
             if (isRapidoEvent && !cachedRapidoEnabled) return
             if (isUberEvent && !cachedUberEnabled) return
 
-            val isHighEnd = com.tellmeindia.iaccept.logic.HardwareDetector.getHardwareTier(this) == com.tellmeindia.iaccept.logic.HardwareTier.HIGH_END
-            val throttleInterval = if (isHighEnd) 30L else 120L
+            // 1. Adaptive Throttling based on hardware (Prevents low-end phone freezes)
+            val throttleInterval = if (isHighEndDevice) 30L else 150L
 
             val currentTime = System.currentTimeMillis()
             if (currentTime - lastScanTime < throttleInterval) return
@@ -199,13 +207,18 @@ class RideAccessibilityService : AccessibilityService() {
     }
 
     private fun processEventOptimized(event: AccessibilityEvent) {
+        // Periodic Pruning (Every 10 mins) to keep memory at absolute zero
+        val now = System.currentTimeMillis()
+        if (now - lastPruneTime > 600000) {
+            lastPruneTime = now
+            acceptedRides.entries.removeIf { (now - it.value) > 3600000 }
+        }
+
         val roots = mutableListOf<AccessibilityNodeInfo>()
         
-        // Use event source as first priority (Fastest)
         event.source?.let { roots.add(it) }
         
         if (roots.isEmpty()) {
-            // Low-latency fallback for windows
             try {
                 windows.find { win ->
                     val rootPkg = win.root?.packageName?.toString() ?: ""
@@ -233,7 +246,7 @@ class RideAccessibilityService : AccessibilityService() {
                     if (match.isMatch) {
                         if (cachedAutoAccept && cachedScreenInteraction) {
                             if (performRobustClick(acceptNode)) {
-                                acceptedRides[rideInfo.fingerprint] = System.currentTimeMillis()
+                                markRideAccepted(rideInfo.fingerprint)
                                 serviceScope.launch(Dispatchers.Main) {
                                     handleSuccessfulAccept(rideInfo)
                                 }
@@ -244,7 +257,7 @@ class RideAccessibilityService : AccessibilityService() {
                         }
                     } else {
                         if (acceptedRides[rideInfo.fingerprint] == null) {
-                            acceptedRides[rideInfo.fingerprint] = System.currentTimeMillis()
+                            markRideAccepted(rideInfo.fingerprint)
                             serviceScope.launch(Dispatchers.Main) {
                                 handleIgnoredRide(rideInfo, match.reason)
                             }
@@ -258,7 +271,6 @@ class RideAccessibilityService : AccessibilityService() {
     private fun collectAllTextOptimized(node: AccessibilityNodeInfo?): String {
         if (node == null) return ""
         val sb = StringBuilder()
-        // Use a Queue (FIFO) to preserve top-to-bottom visual order of the screen
         val queue: Deque<AccessibilityNodeInfo> = LinkedList()
         queue.add(node)
         
@@ -270,7 +282,8 @@ class RideAccessibilityService : AccessibilityService() {
             if (desc != null) sb.append(desc).append("|")
             
             for (i in 0 until current.childCount) {
-                current.getChild(i)?.let { queue.addLast(it) }
+                val child = current.getChild(i)
+                if (child != null) queue.addLast(child)
             }
             if (current != node) {
                 try { current.recycle() } catch (e: Exception) {}
@@ -356,7 +369,9 @@ class RideAccessibilityService : AccessibilityService() {
             putExtra(RideOverlayService.EXTRA_TEXT, rideInfo.rawText)
             putExtra(RideOverlayService.EXTRA_IS_MATCH, true)
         }
-        startService(overlayIntent)
+        try {
+            startService(overlayIntent)
+        } catch (e: Throwable) { }
     }
 
     private fun handleIgnoredRide(rideInfo: RideInfo, reason: String) {
@@ -376,13 +391,11 @@ class RideAccessibilityService : AccessibilityService() {
                          "🏁 TO: ${rideInfo.dropAddress}\n\n" +
                          "🚫 REASON: $reason"))
             .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setTimeoutAfter(8000L)
             .setAutoCancel(true)
             .build()
 
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        try { manager.cancelAll() } catch (e: Exception) { }
-        manager.notify(IGNORE_NOTIF_ID, notification)
+        manager.notify(RIDE_REPORT_ID, notification)
     }
 
     private fun handleSuccessfulAccept(rideInfo: RideInfo) {
@@ -393,9 +406,14 @@ class RideAccessibilityService : AccessibilityService() {
 
     private fun playCatSound() {
         try {
-            val mediaPlayer = MediaPlayer.create(this, R.raw.cat_meow)
-            mediaPlayer?.setOnCompletionListener { it.release() }
-            mediaPlayer?.start()
+            activeMediaPlayer?.stop()
+            activeMediaPlayer?.release()
+            activeMediaPlayer = MediaPlayer.create(this, R.raw.cat_meow)
+            activeMediaPlayer?.setOnCompletionListener { 
+                it.release()
+                if (activeMediaPlayer == it) activeMediaPlayer = null
+            }
+            activeMediaPlayer?.start()
         } catch (e: Exception) { }
     }
 
@@ -419,17 +437,21 @@ class RideAccessibilityService : AccessibilityService() {
             .setCategory(NotificationCompat.CATEGORY_ALARM)
             .setVibrate(longArrayOf(0, 400, 100, 400))
             .setDefaults(Notification.DEFAULT_ALL)
-            .setTimeoutAfter(15000L)
             .setAutoCancel(true)
             .build()
 
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        try { manager.cancelAll() } catch (e: Exception) { }
-        manager.notify(SUCCESS_NOTIF_ID, notification)
+        manager.notify(RIDE_REPORT_ID, notification)
     }
 
     override fun onDestroy() {
         isServiceRunning = false
+        try {
+            serviceScope.cancel()
+            activeMediaPlayer?.stop()
+            activeMediaPlayer?.release()
+            activeMediaPlayer = null
+        } catch (e: Throwable) { }
         super.onDestroy()
     }
 

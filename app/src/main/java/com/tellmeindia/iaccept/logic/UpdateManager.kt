@@ -39,10 +39,13 @@ object UpdateManager {
             val downloadId = downloadManager.enqueue(request)
 
             val onCompleteReceiver = object : BroadcastReceiver() {
+                private var isRegistered = true
                 override fun onReceive(ctx: Context?, intent: Intent?) {
+                    if (!isRegistered) return
                     val id = intent?.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1)
                     if (id == downloadId) {
                         try {
+                            isRegistered = false
                             ctx?.unregisterReceiver(this)
                         } catch (e: Exception) { }
                         installApk(context, destinationFile)
